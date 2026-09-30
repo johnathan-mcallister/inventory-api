@@ -24,6 +24,7 @@ Use the returned token with `Authorization: Bearer <token>`.
     * Use case: Check whether the API is running and healthy.
     * Authentication: None
     * Example: Used by Docker, monitoring systems, load balancers, or deployment checks.
+
  * GET /v1/inventory
     * Use case: Retrieve a paginated list of inventory assets.
     * Authentication: JWT required with inventory:read role.
@@ -36,22 +37,27 @@ Use the returned token with `Authorization: Bearer <token>`.
     * cursor - Retrieve the next page
     * limit - Number of results, 1-100, default 25
     * Example use case: An inventory dashboard displaying all active devices at a particular school.
+
  * GET /v1/inventory/{assetId}
     * Use case: Retrieve detailed information about a specific asset.
     * Authentication: JWT required with inventory:read role.
     * Example: Look up a specific laptop, Chromebook, desktop, or other tracked asset using an ID such as ast_12345.
+
  * GET /v1/inventory/{assetId}/history
     * Use case: Retrieve the historical records associated with an asset.
     * Authentication: JWT required with inventory:read role.
     * Example: View an asset's previous locations, status changes, repairs, or other historical events.
+
  * GET /v1/locations
     * Use case: Retrieve the locations associated with inventory for the authenticated tenant.
     * Authentication: JWT required with inventory:read role.
     * Example: Populate a location filter/dropdown in an inventory management application.
+
  * GET /v1/categories
     * Use case: Retrieve the available inventory categories.
     * Authentication: JWT required with inventory:read role.
     * Example: Populate an asset-type/category filter when searching or creating inventory views.
+
  * POST /v1/dev/token
     * Use case: Generate a temporary JWT for development and testing.
     * Authentication: None.
