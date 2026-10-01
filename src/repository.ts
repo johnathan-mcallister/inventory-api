@@ -6,16 +6,38 @@ const contains = (value: string, wanted: string) => value.toLowerCase().includes
 
 export class InMemoryInventoryRepository implements InventoryRepository {
   private devices: Stored<Device>[] = [
-    { tenantId: "acme-it", deviceId: 1, assetTag: "ACME-1001", serialNumber: "C02ZQ0ABCD", deviceType: "LAPTOP", manufacturer: "Apple", model: "MacBook Pro 14-inch", status: "AVAILABLE", centerId: 1 },
-    { tenantId: "acme-it", deviceId: 2, assetTag: "ACME-1002", serialNumber: "PF3AB9CD", deviceType: "LAPTOP", manufacturer: "Lenovo", model: "ThinkPad T14 Gen 5", status: "AVAILABLE", centerId: 2 }
+    { tenantId: "eigen-it", deviceId: 1, assetTag: "OCDC-1001", serialNumber: "C02ZQ0ABCD", deviceType: "LAPTOP", manufacturer: "Apple", model: "MacBook Pro 14-inch", status: "AVAILABLE", centerId: 1 },
+    { tenantId: "eigen-it", deviceId: 2, assetTag: "OCDC-1002", serialNumber: "PF3AB9CD", deviceType: "LAPTOP", manufacturer: "Lenovo", model: "ThinkPad T14 Gen 5", status: "AVAILABLE", centerId: 2 },
+    { tenantId: "eigen-it", deviceId: 3, assetTag: "OCDC-1003", serialNumber: "SM-T736-001", deviceType: "TABLET", manufacturer: "Samsung", model: "Galaxy Tab S7 FE", status: "AVAILABLE", centerId: 1 },
+    { tenantId: "eigen-it", deviceId: 4, assetTag: "OCDC-1004", serialNumber: "INSEEGO-M2-001", deviceType: "HOTSPOT", manufacturer: "Inseego", model: "MiFi M2000", status: "AVAILABLE", centerId: 1 },
+    { tenantId: "eigen-it", deviceId: 5, assetTag: "OCDC-1005", serialNumber: "DELL-5430-001", deviceType: "LAPTOP", manufacturer: "Dell", model: "Latitude 5430", status: "AVAILABLE", centerId: 2 },
+    { tenantId: "eigen-it", deviceId: 6, assetTag: "OCDC-1006", serialNumber: "NETGEAR-M6-001", deviceType: "HOTSPOT", manufacturer: "Netgear", model: "Nighthawk M6", status: "CHECKED_OUT", centerId: 3 },
+    { tenantId: "eigen-it", deviceId: 7, assetTag: "OCDC-1007", serialNumber: "IPAD10-001", deviceType: "TABLET", manufacturer: "Apple", model: "iPad 10th Generation", status: "CHECKED_OUT", centerId: 3 },
+    { tenantId: "eigen-it", deviceId: 8, assetTag: "OCDC-1008", serialNumber: "HP-440G9-001", deviceType: "LAPTOP", manufacturer: "HP", model: "ProBook 440 G9", status: "MAINTENANCE", centerId: 4 },
+    { tenantId: "eigen-it", deviceId: 9, assetTag: "OCDC-1009", serialNumber: "SURFACE-GO3-001", deviceType: "TABLET", manufacturer: "Microsoft", model: "Surface Go 3", status: "AVAILABLE", centerId: 2 },
+    { tenantId: "eigen-it", deviceId: 10, assetTag: "OCDC-1010", serialNumber: "FRANKLIN-T10-001", deviceType: "HOTSPOT", manufacturer: "Franklin", model: "T10", status: "AVAILABLE", centerId: 3 }
   ];
   private centers: Stored<OutreachCenter>[] = [
-    { tenantId: "acme-it", centerId: 1, centerName: "Central Outreach Center", address: "1 Main Street", phone: "+1-555-0101", isActive: true, createdAt: "2026-01-01T00:00:00.000Z" },
-    { tenantId: "acme-it", centerId: 2, centerName: "West Outreach Center", address: "2 West Street", phone: "+1-555-0102", isActive: true, createdAt: "2026-01-02T00:00:00.000Z" }
+    { tenantId: "eigen-it", centerId: 1, centerName: "Central Outreach Center", address: "1 Main Street", phone: "+1-555-0101", isActive: true, createdAt: "2026-01-01T00:00:00.000Z" },
+    { tenantId: "eigen-it", centerId: 2, centerName: "West Outreach Center", address: "2 West Street", phone: "+1-555-0102", isActive: true, createdAt: "2026-01-02T00:00:00.000Z" },
+    { tenantId: "eigen-it", centerId: 3, centerName: "Northside Community Hub", address: "310 North Avenue", phone: "+1-555-0103", isActive: true, createdAt: "2026-02-15T00:00:00.000Z" },
+    { tenantId: "eigen-it", centerId: 4, centerName: "South Mobile Outreach", address: "88 South Market Road", phone: "+1-555-0104", isActive: false, createdAt: "2026-03-20T00:00:00.000Z" }
   ];
-  private reasons: Stored<LoanReason>[] = [{ tenantId: "acme-it", reasonId: 1, reasonName: "Education" }];
-  private loans: Stored<Loan>[] = [];
-  private maintenance: Stored<MaintenanceRecord>[] = [];
+  private reasons: Stored<LoanReason>[] = [
+    { tenantId: "eigen-it", reasonId: 1, reasonName: "Education" },
+    { tenantId: "eigen-it", reasonId: 2, reasonName: "Employment Search" },
+    { tenantId: "eigen-it", reasonId: 3, reasonName: "Telehealth" },
+    { tenantId: "eigen-it", reasonId: 4, reasonName: "Emergency Communication" }
+  ];
+  private loans: Stored<Loan>[] = [
+    { tenantId: "eigen-it", loanId: 1, deviceId: 3, centerId: 1, reasonId: 1, participantCode: "PART-1001", checkoutDate: "2026-06-01T09:00:00.000Z", dueDate: "2026-06-29T17:00:00.000Z", returnDate: "2026-06-25T15:30:00.000Z", loanStatus: "RETURNED" },
+    { tenantId: "eigen-it", loanId: 2, deviceId: 6, centerId: 3, reasonId: 4, participantCode: "PART-1002", checkoutDate: "2026-07-10T10:00:00.000Z", dueDate: "2026-08-10T17:00:00.000Z", returnDate: null, loanStatus: "OVERDUE" },
+    { tenantId: "eigen-it", loanId: 3, deviceId: 7, centerId: 3, reasonId: 2, participantCode: "PART-1003", checkoutDate: "2026-09-20T13:00:00.000Z", dueDate: "2026-10-20T17:00:00.000Z", returnDate: null, loanStatus: "ACTIVE" }
+  ];
+  private maintenance: Stored<MaintenanceRecord>[] = [
+    { tenantId: "eigen-it", maintenanceId: 1, deviceId: 5, issueDescription: "Keyboard replacement completed", serviceDate: "2026-05-12", resolvedDate: "2026-05-15", maintenanceStatus: "RESOLVED" },
+    { tenantId: "eigen-it", maintenanceId: 2, deviceId: 8, issueDescription: "Display flickers when the lid is moved", serviceDate: "2026-09-28", resolvedDate: null, maintenanceStatus: "OPEN" }
+  ];
   async listDevices(t: string, q: DeviceQuery) { let r = this.devices.filter((x) => x.tenantId === t); if (q.deviceType) r = r.filter((x) => x.deviceType === q.deviceType); if (q.status) r = r.filter((x) => x.status === q.status); if (q.centerId) r = r.filter((x) => x.centerId === q.centerId); if (q.assetTag) r = r.filter((x) => x.assetTag === q.assetTag); if (q.serialNumber) r = r.filter((x) => x.serialNumber === q.serialNumber); if (q.manufacturer) r = r.filter((x) => contains(x.manufacturer, q.manufacturer!)); if (q.model) r = r.filter((x) => contains(x.model, q.model!)); if (q.search) r = r.filter((x) => [x.assetTag, x.serialNumber, x.manufacturer, x.model].some((v) => contains(v, q.search!))); return paginate(r.map((x) => this.clean(x)), q.cursor, q.limit, "deviceId"); }
   async getDevice(t: string, id: number) { const x = this.devices.find((r) => r.tenantId === t && r.deviceId === id); return x && this.clean(x); }
   async createDevice(t: string, input: CreateDevice) { if (!this.centers.some((x) => x.tenantId === t && x.centerId === input.centerId)) throw new RepositoryNotFound("Center not found"); if (this.devices.some((x) => x.tenantId === t && x.assetTag === input.assetTag)) throw new RepositoryConflict("Asset tag already exists"); if (this.devices.some((x) => x.tenantId === t && x.serialNumber === input.serialNumber)) throw new RepositoryConflict("Serial number already exists"); const row = { ...input, tenantId: t, deviceId: this.next(this.devices, "deviceId") }; this.devices.push(row); return this.clean(row); }

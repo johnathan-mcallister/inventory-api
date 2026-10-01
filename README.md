@@ -300,7 +300,7 @@ Protected endpoints can return `400` for invalid input, `401` for missing or inv
 - Notes: The server assigns all development API permissions to the signed token.
 
 ```sh
-curl -X POST http://127.0.0.1:3020/v1/dev/token -H "content-type: application/json" -d "{\"tenantId\":\"acme-it\"}"
+curl -X POST http://127.0.0.1:3020/v1/dev/token -H "content-type: application/json" -d "{\"tenantId\":\"eigen-it\"}"
 ```
 
 ## Transaction and schema TODOs

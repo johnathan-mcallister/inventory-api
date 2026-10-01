@@ -4,14 +4,14 @@ import { buildApp } from "../src/app.js";
 
 process.env.JWT_SECRET = "test-secret-that-is-long-enough-for-jwt-signing";
 const allRoles = ["inventory:read", "inventory:write", "loans:read", "loans:write", "centers:read", "centers:write", "maintenance:read", "maintenance:write", "loan-reasons:read", "loan-reasons:write"];
-async function session(roles = allRoles, tenantId = "acme-it") { const app = await buildApp(); const token = app.jwt.sign({ sub: "test-user", tenantId, roles }); return { app, headers: { authorization: `Bearer ${token}` } }; }
+async function session(roles = allRoles, tenantId = "eigen-it") { const app = await buildApp(); const token = app.jwt.sign({ sub: "test-user", tenantId, roles }); return { app, headers: { authorization: `Bearer ${token}` } }; }
 const device = { assetTag: "NEW-1", serialNumber: "SERIAL-1", deviceType: "TABLET", manufacturer: "Example", model: "T1", status: "AVAILABLE", centerId: 1 };
 const loan = { deviceId: 1, centerId: 1, reasonId: 1, participantCode: "P-1", checkoutDate: "2026-09-01T10:00:00.000Z", dueDate: "2026-10-01T10:00:00.000Z" };
 
 test("authentication, resource authorization, and tenant isolation", async (t) => {
   const app = await buildApp(); t.after(() => app.close());
   assert.equal((await app.inject({ method: "GET", url: "/v1/inventory" })).statusCode, 401);
-  const wrongRole = app.jwt.sign({ tenantId: "acme-it", roles: ["loans:read"] });
+  const wrongRole = app.jwt.sign({ tenantId: "eigen-it", roles: ["loans:read"] });
   assert.equal((await app.inject({ method: "GET", url: "/v1/inventory", headers: { authorization: `Bearer ${wrongRole}` } })).statusCode, 403);
   const otherTenant = app.jwt.sign({ tenantId: "other", roles: ["inventory:read"] });
   const isolated = await app.inject({ method: "GET", url: "/v1/inventory", headers: { authorization: `Bearer ${otherTenant}` } });
@@ -85,7 +85,7 @@ test("device history contains schema-backed loans and maintenance only", async (
 
 test("development token does not require roles in the request", async (t) => {
   const app = await buildApp(); t.after(() => app.close());
-  const response = await app.inject({ method: "POST", url: "/v1/dev/token", payload: { tenantId: "acme-it" } });
+  const response = await app.inject({ method: "POST", url: "/v1/dev/token", payload: { tenantId: "eigen-it" } });
   assert.equal(response.statusCode, 200);
   const payload = app.jwt.verify<{ roles: string[] }>(response.json().token);
   assert.ok(payload.roles.includes("inventory:read"));
