@@ -1,37 +1,43 @@
-import type { Asset, AssetEvent, InventoryQuery, InventoryRepository } from "./types.js";
-
-const assets: Asset[] = [
-  { id: "ast_01HQJ9K8WT", tenantId: "acme-it", assetTag: "ACME-1001", serialNumber: "C02ZQ0ABCD", name: "MacBook Pro 14", type: "laptop", manufacturer: "Apple", model: "MacBook Pro 14-inch", status: "active", location: "Auckland", assignedTo: "alex@example.com", tags: ["engineering", "managed"], purchasedAt: "2025-02-03", updatedAt: "2026-08-21T11:30:00.000Z" },
-  { id: "ast_01HQJ9M2P3", tenantId: "acme-it", assetTag: "ACME-1002", serialNumber: "PF3AB9CD", name: "ThinkPad T14", type: "laptop", manufacturer: "Lenovo", model: "ThinkPad T14 Gen 5", status: "in_stock", location: "Wellington", tags: ["managed"], purchasedAt: "2025-06-14", updatedAt: "2026-08-17T09:00:00.000Z" }
-];
-
-const events: AssetEvent[] = [
-  { id: "evt_001", assetId: "ast_01HQJ9K8WT", tenantId: "acme-it", occurredAt: "2026-08-21T11:30:00.000Z", action: "assigned", actor: "admin@example.com", detail: "Assigned to alex@example.com" },
-  { id: "evt_002", assetId: "ast_01HQJ9K8WT", tenantId: "acme-it", occurredAt: "2025-02-03T12:00:00.000Z", action: "created", actor: "import-service", detail: "Imported from ITAM source" }
-];
+import type { CenterQuery, CreateCenter, CreateDevice, CreateLoan, CreateMaintenance, Device, DeviceQuery, InventoryRepository, Loan, LoanQuery, LoanReason, MaintenanceQuery, MaintenanceRecord, OutreachCenter, Page, UpdateCenter, UpdateDevice, UpdateLoan, UpdateMaintenance } from "./types.js";
+import { RepositoryConflict, RepositoryNotFound } from "./types.js";
+type Stored<T> = T & { tenantId: string };
+const paginate = <T extends object>(rows: T[], cursor: number | undefined, limit: number, id: keyof T): Page<T> => { const sorted = [...rows].sort((a, b) => Number(a[id]) - Number(b[id])); const remaining = cursor === undefined ? sorted : sorted.filter((row) => Number(row[id]) > cursor); const items = remaining.slice(0, limit); return { items, nextCursor: remaining.length > limit ? Number(items.at(-1)?.[id]) : undefined }; };
+const contains = (value: string, wanted: string) => value.toLowerCase().includes(wanted.toLowerCase());
 
 export class InMemoryInventoryRepository implements InventoryRepository {
-  async listAssets(tenantId: string, query: InventoryQuery) {
-    let rows = assets.filter((asset) => asset.tenantId === tenantId);
-    if (query.type) rows = rows.filter((a) => a.type === query.type);
-    if (query.status) rows = rows.filter((a) => a.status === query.status);
-    if (query.location) rows = rows.filter((a) => a.location === query.location);
-    if (query.tag) rows = rows.filter((a) => a.tags.includes(query.tag!));
-    if (query.search) {
-      const text = query.search.toLowerCase();
-      rows = rows.filter((a) => [a.name, a.assetTag, a.serialNumber, a.manufacturer, a.model].some((value) => value.toLowerCase().includes(text)));
-    }
-    rows.sort((a, b) => a.id.localeCompare(b.id));
-    const start = query.cursor ? Math.max(0, rows.findIndex((a) => a.id === query.cursor) + 1) : 0;
-    const page = rows.slice(start, start + query.limit);
-    return { items: page, nextCursor: start + query.limit < rows.length ? page.at(-1)?.id : undefined };
-  }
-
-  async getAsset(tenantId: string, id: string) { return assets.find((asset) => asset.tenantId === tenantId && asset.id === id); }
-  async getHistory(tenantId: string, assetId: string) {
-    if (!assets.some((asset) => asset.tenantId === tenantId && asset.id === assetId)) return undefined;
-    return events.filter((event) => event.tenantId === tenantId && event.assetId === assetId).sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
-  }
-  async listLocations(tenantId: string) { return [...new Set(assets.filter((a) => a.tenantId === tenantId).map((a) => a.location))].sort(); }
-  async listCategories(tenantId: string) { return [...new Set(assets.filter((a) => a.tenantId === tenantId).map((a) => a.type))].sort(); }
+  private devices: Stored<Device>[] = [
+    { tenantId: "acme-it", deviceId: 1, assetTag: "ACME-1001", serialNumber: "C02ZQ0ABCD", deviceType: "LAPTOP", manufacturer: "Apple", model: "MacBook Pro 14-inch", status: "AVAILABLE", centerId: 1 },
+    { tenantId: "acme-it", deviceId: 2, assetTag: "ACME-1002", serialNumber: "PF3AB9CD", deviceType: "LAPTOP", manufacturer: "Lenovo", model: "ThinkPad T14 Gen 5", status: "AVAILABLE", centerId: 2 }
+  ];
+  private centers: Stored<OutreachCenter>[] = [
+    { tenantId: "acme-it", centerId: 1, centerName: "Central Outreach Center", address: "1 Main Street", phone: "+1-555-0101", isActive: true, createdAt: "2026-01-01T00:00:00.000Z" },
+    { tenantId: "acme-it", centerId: 2, centerName: "West Outreach Center", address: "2 West Street", phone: "+1-555-0102", isActive: true, createdAt: "2026-01-02T00:00:00.000Z" }
+  ];
+  private reasons: Stored<LoanReason>[] = [{ tenantId: "acme-it", reasonId: 1, reasonName: "Education" }];
+  private loans: Stored<Loan>[] = [];
+  private maintenance: Stored<MaintenanceRecord>[] = [];
+  async listDevices(t: string, q: DeviceQuery) { let r = this.devices.filter((x) => x.tenantId === t); if (q.deviceType) r = r.filter((x) => x.deviceType === q.deviceType); if (q.status) r = r.filter((x) => x.status === q.status); if (q.centerId) r = r.filter((x) => x.centerId === q.centerId); if (q.assetTag) r = r.filter((x) => x.assetTag === q.assetTag); if (q.serialNumber) r = r.filter((x) => x.serialNumber === q.serialNumber); if (q.manufacturer) r = r.filter((x) => contains(x.manufacturer, q.manufacturer!)); if (q.model) r = r.filter((x) => contains(x.model, q.model!)); if (q.search) r = r.filter((x) => [x.assetTag, x.serialNumber, x.manufacturer, x.model].some((v) => contains(v, q.search!))); return paginate(r.map((x) => this.clean(x)), q.cursor, q.limit, "deviceId"); }
+  async getDevice(t: string, id: number) { const x = this.devices.find((r) => r.tenantId === t && r.deviceId === id); return x && this.clean(x); }
+  async createDevice(t: string, input: CreateDevice) { if (!this.centers.some((x) => x.tenantId === t && x.centerId === input.centerId)) throw new RepositoryNotFound("Center not found"); if (this.devices.some((x) => x.tenantId === t && x.assetTag === input.assetTag)) throw new RepositoryConflict("Asset tag already exists"); if (this.devices.some((x) => x.tenantId === t && x.serialNumber === input.serialNumber)) throw new RepositoryConflict("Serial number already exists"); const row = { ...input, tenantId: t, deviceId: this.next(this.devices, "deviceId") }; this.devices.push(row); return this.clean(row); }
+  async updateDevice(t: string, id: number, patch: UpdateDevice) { const x = this.devices.find((r) => r.tenantId === t && r.deviceId === id); if (!x) return; if (patch.centerId !== undefined && !this.centers.some((r) => r.tenantId === t && r.centerId === patch.centerId)) throw new RepositoryConflict("Center not found"); if (patch.assetTag && this.devices.some((r) => r.tenantId === t && r.deviceId !== id && r.assetTag === patch.assetTag)) throw new RepositoryConflict("Asset tag already exists"); if (patch.serialNumber && this.devices.some((r) => r.tenantId === t && r.deviceId !== id && r.serialNumber === patch.serialNumber)) throw new RepositoryConflict("Serial number already exists"); Object.assign(x, patch); return this.clean(x); }
+  async listCenters(t: string, q: CenterQuery) { let r = this.centers.filter((x) => x.tenantId === t); if (q.isActive !== undefined) r = r.filter((x) => x.isActive === q.isActive); if (q.search) r = r.filter((x) => [x.centerName, x.address, x.phone].some((v) => contains(v, q.search!))); return paginate(r.map((x) => this.clean(x)), q.cursor, q.limit, "centerId"); }
+  async getCenter(t: string, id: number) { const x = this.centers.find((r) => r.tenantId === t && r.centerId === id); return x && this.clean(x); }
+  async createCenter(t: string, input: CreateCenter) { const x = { ...input, tenantId: t, centerId: this.next(this.centers, "centerId"), createdAt: new Date().toISOString() }; this.centers.push(x); return this.clean(x); }
+  async updateCenter(t: string, id: number, patch: UpdateCenter) { const x = this.centers.find((r) => r.tenantId === t && r.centerId === id); if (!x) return; Object.assign(x, patch); return this.clean(x); }
+  async listLoans(t: string, q: LoanQuery) { let r = this.loans.filter((x) => x.tenantId === t); if (q.loanStatus) r = r.filter((x) => x.loanStatus === q.loanStatus); if (q.centerId) r = r.filter((x) => x.centerId === q.centerId); if (q.deviceId) r = r.filter((x) => x.deviceId === q.deviceId); if (q.participantCode) r = r.filter((x) => x.participantCode === q.participantCode); if (q.reasonId) r = r.filter((x) => x.reasonId === q.reasonId); if (q.checkoutFrom) r = r.filter((x) => x.checkoutDate >= q.checkoutFrom!); if (q.checkoutTo) r = r.filter((x) => x.checkoutDate <= q.checkoutTo!); if (q.dueFrom) r = r.filter((x) => x.dueDate >= q.dueFrom!); if (q.dueTo) r = r.filter((x) => x.dueDate <= q.dueTo!); return paginate(r.map((x) => this.clean(x)), q.cursor, q.limit, "loanId"); }
+  async getLoan(t: string, id: number) { const x = this.loans.find((r) => r.tenantId === t && r.loanId === id); return x && this.clean(x); }
+  async createLoan(t: string, input: CreateLoan) { const d = this.devices.find((x) => x.tenantId === t && x.deviceId === input.deviceId); if (!d) throw new RepositoryNotFound("Device not found"); if (!this.centers.some((x) => x.tenantId === t && x.centerId === input.centerId)) throw new RepositoryNotFound("Center not found"); if (!this.reasons.some((x) => x.tenantId === t && x.reasonId === input.reasonId)) throw new RepositoryNotFound("Loan reason not found"); if (d.status !== "AVAILABLE" || this.loans.some((x) => x.tenantId === t && x.deviceId === input.deviceId && x.loanStatus === "ACTIVE")) throw new RepositoryConflict("Device is not available"); /* TODO: The MySQL implementation must create the loan and update the device in one transaction. */ const x: Stored<Loan> = { ...input, tenantId: t, loanId: this.next(this.loans, "loanId"), returnDate: null, loanStatus: "ACTIVE" }; this.loans.push(x); d.status = "CHECKED_OUT"; return this.clean(x); }
+  async updateLoan(t: string, id: number, patch: UpdateLoan) { const x = this.loans.find((r) => r.tenantId === t && r.loanId === id); if (!x) return; if (x.loanStatus === "RETURNED") throw new RepositoryConflict("Returned loans cannot be updated"); if (patch.reasonId && !this.reasons.some((r) => r.tenantId === t && r.reasonId === patch.reasonId)) throw new RepositoryConflict("Loan reason not found"); Object.assign(x, patch); return this.clean(x); }
+  async returnLoan(t: string, id: number, date: string) { const x = this.loans.find((r) => r.tenantId === t && r.loanId === id); if (!x) return; if (x.loanStatus === "RETURNED") throw new RepositoryConflict("Loan has already been returned"); const d = this.devices.find((r) => r.tenantId === t && r.deviceId === x.deviceId); if (!d) throw new RepositoryConflict("Associated device not found"); /* TODO: The MySQL implementation must return the loan and update the device in one transaction. */ x.returnDate = date; x.loanStatus = "RETURNED"; d.status = "AVAILABLE"; return this.clean(x); }
+  async listLoanReasons(t: string) { return this.reasons.filter((x) => x.tenantId === t).map((x) => this.clean(x)); }
+  async getLoanReason(t: string, id: number) { const x = this.reasons.find((r) => r.tenantId === t && r.reasonId === id); return x && this.clean(x); }
+  async createLoanReason(t: string, name: string) { if (this.reasons.some((x) => x.tenantId === t && x.reasonName.toLowerCase() === name.toLowerCase())) throw new RepositoryConflict("Loan reason already exists"); const x = { tenantId: t, reasonId: this.next(this.reasons, "reasonId"), reasonName: name }; this.reasons.push(x); return this.clean(x); }
+  async updateLoanReason(t: string, id: number, name: string) { const x = this.reasons.find((r) => r.tenantId === t && r.reasonId === id); if (!x) return; if (this.reasons.some((r) => r.tenantId === t && r.reasonId !== id && r.reasonName.toLowerCase() === name.toLowerCase())) throw new RepositoryConflict("Loan reason already exists"); x.reasonName = name; return this.clean(x); }
+  async listMaintenance(t: string, q: MaintenanceQuery) { let r = this.maintenance.filter((x) => x.tenantId === t); if (q.deviceId) r = r.filter((x) => x.deviceId === q.deviceId); if (q.maintenanceStatus) r = r.filter((x) => x.maintenanceStatus === q.maintenanceStatus); if (q.serviceFrom) r = r.filter((x) => x.serviceDate >= q.serviceFrom!); if (q.serviceTo) r = r.filter((x) => x.serviceDate <= q.serviceTo!); if (q.resolvedFrom) r = r.filter((x) => !!x.resolvedDate && x.resolvedDate >= q.resolvedFrom!); if (q.resolvedTo) r = r.filter((x) => !!x.resolvedDate && x.resolvedDate <= q.resolvedTo!); return paginate(r.map((x) => this.clean(x)), q.cursor, q.limit, "maintenanceId"); }
+  async getMaintenance(t: string, id: number) { const x = this.maintenance.find((r) => r.tenantId === t && r.maintenanceId === id); return x && this.clean(x); }
+  async createMaintenance(t: string, input: CreateMaintenance) { const d = this.devices.find((x) => x.tenantId === t && x.deviceId === input.deviceId); if (!d) throw new RepositoryNotFound("Device not found"); if (d.status === "CHECKED_OUT") throw new RepositoryConflict("Checked-out devices cannot enter maintenance"); if (d.status === "MAINTENANCE") throw new RepositoryConflict("Device already has active maintenance"); /* TODO: The MySQL implementation must create maintenance and update the device in one transaction. */ const x: Stored<MaintenanceRecord> = { ...input, tenantId: t, maintenanceId: this.next(this.maintenance, "maintenanceId"), resolvedDate: null, maintenanceStatus: "OPEN" }; this.maintenance.push(x); d.status = "MAINTENANCE"; return this.clean(x); }
+  async updateMaintenance(t: string, id: number, patch: UpdateMaintenance) { const x = this.maintenance.find((r) => r.tenantId === t && r.maintenanceId === id); if (!x) return; if (x.maintenanceStatus === "RESOLVED") throw new RepositoryConflict("Resolved maintenance cannot be updated"); if (patch.maintenanceStatus === "IN_PROGRESS" && x.maintenanceStatus !== "OPEN") throw new RepositoryConflict("Invalid maintenance status transition"); Object.assign(x, patch); return this.clean(x); }
+  async resolveMaintenance(t: string, id: number, date: string) { const x = this.maintenance.find((r) => r.tenantId === t && r.maintenanceId === id); if (!x) return; if (x.maintenanceStatus === "RESOLVED") throw new RepositoryConflict("Maintenance is already resolved"); if (this.maintenance.some((r) => r.tenantId === t && r.deviceId === x.deviceId && r.maintenanceId !== id && r.maintenanceStatus !== "RESOLVED")) throw new RepositoryConflict("Device has other active maintenance records"); const d = this.devices.find((r) => r.tenantId === t && r.deviceId === x.deviceId); if (!d) throw new RepositoryConflict("Associated device not found"); /* TODO: The MySQL implementation must resolve maintenance and update the device in one transaction. */ x.maintenanceStatus = "RESOLVED"; x.resolvedDate = date; d.status = "AVAILABLE"; return this.clean(x); }
+  private clean<T extends { tenantId: string }>(x: T): Omit<T, "tenantId"> { const { tenantId: _, ...rest } = x; return rest; }
+  private next<T extends object>(rows: T[], key: keyof T) { return Math.max(0, ...rows.map((x) => Number(x[key]))) + 1; }
 }
