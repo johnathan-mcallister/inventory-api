@@ -4,10 +4,11 @@ import { buildApp } from "../src/app.js";
 
 process.env.JWT_SECRET = "test-secret-that-is-long-enough-for-jwt-signing";
 const allRoles = ["inventory:read", "inventory:write", "loans:read", "loans:write", "centers:read", "centers:write", "maintenance:read", "maintenance:write", "loan-reasons:read", "loan-reasons:write"];
-async function session(roles = allRoles, tenantId = "eigen-it") { const app = await buildApp(); const token = app.jwt.sign({ sub: "test-user", tenantId, roles }); return { app, headers: { authorization: `Bearer ${token}` } }; }
+async function session(roles = allRoles, tenantId = "eigen-it") { const app = await buildApp(); const token = app.jwt.sign({ tenantId, roles }); return { app, headers: { authorization: `Bearer ${token}` } }; }
 const device = { assetTag: "NEW-1", serialNumber: "SERIAL-1", deviceType: "TABLET", manufacturer: "Example", model: "T1", status: "AVAILABLE", centerId: 1 };
 const loan = { deviceId: 1, centerId: 1, reasonId: 1, participantCode: "P-1", checkoutDate: "2026-09-01T10:00:00.000Z", dueDate: "2026-10-01T10:00:00.000Z" };
 
+// Verifies that protected inventory routes require authentication, enforce role-based access, and never expose another tenant's data.
 test("authentication, resource authorization, and tenant isolation", async (t) => {
   const app = await buildApp(); t.after(() => app.close());
   assert.equal((await app.inject({ method: "GET", url: "/v1/inventory" })).statusCode, 401);
@@ -18,6 +19,7 @@ test("authentication, resource authorization, and tenant isolation", async (t) =
   assert.deepEqual(isolated.json().data, []);
 });
 
+// Verifies inventory query filters and pagination, plus validation and not-found responses for device requests.
 test("device IDs, validation, filtering, pagination, and not found", async (t) => {
   const { app, headers } = await session(); t.after(() => app.close());
   const page = await app.inject({ method: "GET", url: "/v1/inventory?deviceType=LAPTOP&status=AVAILABLE&centerId=1&limit=1", headers });
@@ -29,6 +31,7 @@ test("device IDs, validation, filtering, pagination, and not found", async (t) =
   assert.equal((await app.inject({ method: "POST", url: "/v1/inventory", headers, payload: { ...device, deviceType: "PHONE" } })).statusCode, 400);
 });
 
+// Verifies device creation, uniqueness constraints, and protection against direct lifecycle-status changes.
 test("creates devices and rejects duplicate asset tags and serial numbers", async (t) => {
   const { app, headers } = await session(); t.after(() => app.close());
   assert.equal((await app.inject({ method: "POST", url: "/v1/inventory", headers, payload: device })).statusCode, 201);
@@ -37,6 +40,7 @@ test("creates devices and rejects duplicate asset tags and serial numbers", asyn
   assert.equal((await app.inject({ method: "PATCH", url: "/v1/inventory/1", headers, payload: { status: "CHECKED_OUT" } })).statusCode, 400);
 });
 
+// Verifies that centers can be filtered and created, and that requests for missing centers return 404.
 test("center endpoints filter and enforce center roles", async (t) => {
   const { app, headers } = await session(); t.after(() => app.close());
   const list = await app.inject({ method: "GET", url: "/v1/centers?isActive=true&search=central", headers });
@@ -46,12 +50,14 @@ test("center endpoints filter and enforce center roles", async (t) => {
   assert.equal((await app.inject({ method: "GET", url: "/v1/centers/999", headers })).statusCode, 404);
 });
 
+// Verifies that loan-reason names are unique regardless of letter casing.
 test("loan reasons are unique", async (t) => {
   const { app, headers } = await session(); t.after(() => app.close());
   assert.equal((await app.inject({ method: "POST", url: "/v1/loan-reasons", headers, payload: { reasonName: "Employment" } })).statusCode, 201);
   assert.equal((await app.inject({ method: "POST", url: "/v1/loan-reasons", headers, payload: { reasonName: "employment" } })).statusCode, 409);
 });
 
+// Verifies checkout and return lifecycle transitions while rejecting duplicate active loans and repeated returns.
 test("checkout and return update device lifecycle and reject repeats", async (t) => {
   const { app, headers } = await session(); t.after(() => app.close());
   const checkout = await app.inject({ method: "POST", url: "/v1/loans", headers, payload: loan });
@@ -64,6 +70,7 @@ test("checkout and return update device lifecycle and reject repeats", async (t)
   assert.equal((await app.inject({ method: "GET", url: "/v1/inventory/1", headers })).json().data.status, "AVAILABLE");
 });
 
+// Verifies maintenance eligibility and the device-status transitions produced by opening, progressing, and resolving maintenance.
 test("maintenance rejects checked-out devices and resolves lifecycle", async (t) => {
   const { app, headers } = await session(); t.after(() => app.close());
   await app.inject({ method: "POST", url: "/v1/loans", headers, payload: loan });
@@ -76,6 +83,7 @@ test("maintenance rejects checked-out devices and resolves lifecycle", async (t)
   assert.equal((await app.inject({ method: "GET", url: "/v1/inventory/2", headers })).json().data.status, "AVAILABLE");
 });
 
+// Verifies that device history reports the loan and maintenance records supported by the current schema.
 test("device history contains schema-backed loans and maintenance only", async (t) => {
   const { app, headers } = await session(); t.after(() => app.close());
   await app.inject({ method: "POST", url: "/v1/maintenance", headers, payload: { deviceId: 2, issueDescription: "Screen", serviceDate: "2026-09-03" } });
@@ -83,6 +91,7 @@ test("device history contains schema-backed loans and maintenance only", async (
   assert.equal(history.statusCode, 200); assert.equal(history.json().data.maintenanceRecords.length, 1); assert.deepEqual(history.json().data.loans, []);
 });
 
+// Verifies that the development token endpoint assigns the expected roles without accepting roles from the caller.
 test("development token does not require roles in the request", async (t) => {
   const app = await buildApp(); t.after(() => app.close());
   const response = await app.inject({ method: "POST", url: "/v1/dev/token", payload: { tenantId: "eigen-it" } });
@@ -92,6 +101,7 @@ test("development token does not require roles in the request", async (t) => {
   assert.ok(payload.roles.includes("maintenance:write"));
 });
 
+// Verifies that the development-only token endpoint is not registered in production.
 test("development token is absent in production", async (t) => {
   const previous = process.env.NODE_ENV; process.env.NODE_ENV = "production"; const app = await buildApp(); t.after(async () => { await app.close(); if (previous === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previous; });
   assert.equal((await app.inject({ method: "POST", url: "/v1/dev/token", payload: { tenantId: "x" } })).statusCode, 404);

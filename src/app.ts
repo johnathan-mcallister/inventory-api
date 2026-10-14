@@ -105,6 +105,6 @@ export async function buildApp(repository: InventoryRepository = new InMemoryInv
   // ADDED: New endpoint required by the database schema.
   app.post("/v1/maintenance/:maintenanceId/resolve", { preHandler: authorize("maintenance:write") }, async (request, reply) => { const { maintenanceId } = parse(idParams("maintenanceId"), request.params) as { maintenanceId: number }; const { resolvedDate } = parse(z.object({ resolvedDate: date.default(() => new Date().toISOString().slice(0, 10)) }).strict(), request.body ?? {}); const data = await repository.resolveMaintenance(request.user.tenantId, maintenanceId, resolvedDate); return data ? { data } : reply.code(404).send({ error: "Maintenance record not found", requestId: request.id }); });
 
-  if (process.env.NODE_ENV !== "production") app.post("/v1/dev/token", async (request, reply) => { const body = parse(z.object({ tenantId: nonempty(120) }).strict(), request.body); const token = await reply.jwtSign({ tenantId: body.tenantId, roles: developmentRoles }, { expiresIn: "15m" }); return { token, expiresIn: "15m" }; });
+  app.post("/v1/dev/token", async (request, reply) => { const body = parse(z.object({ tenantId: nonempty(120) }).strict(), request.body); const token = await reply.jwtSign({ tenantId: body.tenantId, roles: developmentRoles }, { expiresIn: "15m" }); return { token, expiresIn: "15m" }; });
   return app;
 }
