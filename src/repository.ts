@@ -21,7 +21,8 @@ export class InMemoryInventoryRepository implements InventoryRepository {
     { tenantId: "eigen-it", centerId: 1, centerName: "Central Outreach Center", address: "1 Main Street", phone: "+1-555-0101", isActive: true, createdAt: "2026-01-01T00:00:00.000Z" },
     { tenantId: "eigen-it", centerId: 2, centerName: "West Outreach Center", address: "2 West Street", phone: "+1-555-0102", isActive: true, createdAt: "2026-01-02T00:00:00.000Z" },
     { tenantId: "eigen-it", centerId: 3, centerName: "Northside Community Hub", address: "310 North Avenue", phone: "+1-555-0103", isActive: true, createdAt: "2026-02-15T00:00:00.000Z" },
-    { tenantId: "eigen-it", centerId: 4, centerName: "South Mobile Outreach", address: "88 South Market Road", phone: "+1-555-0104", isActive: false, createdAt: "2026-03-20T00:00:00.000Z" }
+    { tenantId: "eigen-it", centerId: 4, centerName: "South Mobile Outreach", address: "88 South Market Road", phone: "+1-555-0104", isActive: false, createdAt: "2026-03-20T00:00:00.000Z" },
+    { tenantId: "eigen-it", centerId: 5, centerName: "Englewood", address: "88 South Market Road", phone: "+1-555-0104", isActive: true, createdAt: "2026-03-20T00:00:00.000Z" }
   ];
   private reasons: Stored<LoanReason>[] = [
     { tenantId: "eigen-it", reasonId: 1, reasonName: "Education" },
