@@ -1,3 +1,6 @@
+Branch: Security
+The local `feature/user-security` branch tracks the local `origin/main` reference at `743029f`. The local `master` branch points to `john-upstream/master`, 
+
 # Community Outreach Technology Loan API
 
 Fastify/TypeScript API for tenant-scoped outreach centers, devices, loans, loan reasons, and maintenance. JSON fields use camelCase; a MySQL repository maps them to snake_case columns.
