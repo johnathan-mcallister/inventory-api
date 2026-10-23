@@ -39,12 +39,23 @@ export async function buildApp(repository: InventoryRepository = new InMemoryInv
   await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
   await app.register(jwt, { secret });
   app.setErrorHandler((error, request, reply) => { request.log.warn({ err: error, requestId: request.id }, "Request failed"); const known = error as Error & { statusCode?: number; issues?: unknown }; const statusCode = known.statusCode && known.statusCode >= 400 ? known.statusCode : 500; reply.code(statusCode).send({ error: statusCode === 500 ? "Internal server error" : known.message, requestId: request.id, ...(known.issues ? { details: known.issues } : {}) }); });
-
   // TODO: Add a separate readiness check that verifies MySQL connectivity.
   app.get("/health", async () => ({ status: "ok" }));
-  app.addHook("onRequest", async (request) => { if (!request.url.startsWith("/v1/") || request.url === "/v1/dev/token") return; await request.jwtVerify(); });
 
-  const deviceQuery = z.object({ deviceType: deviceType.optional(), status: deviceStatus.optional(), centerId: positiveId.optional(), assetTag: nonempty(50).optional(), serialNumber: nonempty(100).optional(), manufacturer: nonempty(100).optional(), model: nonempty(100).optional(), search: nonempty(120).optional(), ...pagination }).strict();
+  app.addHook("onRequest", async (request) => {
+    const pathname = request.url.split("?")[0] ?? request.url;
+
+    if (
+        !pathname.startsWith("/v1/") ||
+        pathname === "/v1/dev/token" ||
+        pathname === "/v1/auth/login"
+    ) {
+      return;
+    }
+
+    await request.jwtVerify();
+  });
+
   // UPDATED: Changed endpoint to match the MySQL device schema.
   app.get("/v1/inventory", { preHandler: authorize("inventory:read") }, async (request) => { const q = parse(deviceQuery, request.query); return pageResponse(await repository.listDevices(request.user.tenantId, q), q.limit); });
   // ADDED: New endpoint required by the database schema.
