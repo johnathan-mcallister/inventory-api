@@ -35,7 +35,8 @@ export async function buildApp(repository: InventoryRepository = new InMemoryInv
   const secret = process.env.JWT_SECRET;
   if (!secret || secret.length < 32) throw new Error("JWT_SECRET must be set to at least 32 characters");
   await app.register(helmet, { contentSecurityPolicy: false});
-  await app.register(cors, { origin: "*" });
+  // @fastify/cors only allows GET,HEAD,POST by default; browsers need PATCH allowed for the update endpoints.
+  await app.register(cors, { origin: "*", methods: ["GET", "HEAD", "POST", "PATCH", "OPTIONS"] });
   await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
   await app.register(jwt, { secret });
   app.setErrorHandler((error, request, reply) => { request.log.warn({ err: error, requestId: request.id }, "Request failed"); const known = error as Error & { statusCode?: number; issues?: unknown }; const statusCode = known.statusCode && known.statusCode >= 400 ? known.statusCode : 500; reply.code(statusCode).send({ error: statusCode === 500 ? "Internal server error" : known.message, requestId: request.id, ...(known.issues ? { details: known.issues } : {}) }); });

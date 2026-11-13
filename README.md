@@ -10,6 +10,14 @@ copy .env.example .env
 npm run dev
 ```
 
+`npm run dev` and `npm start` both load variables from `.env`. Before starting, replace the `JWT_SECRET` placeholder in `.env` with a random value of **at least 32 characters**; the server refuses to start with `JWT_SECRET must be set to at least 32 characters` otherwise. For example, generate one with:
+
+```sh
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+On Render (or any other host), set `JWT_SECRET` as an environment variable with the same 32-character minimum.
+
 All `/v1` endpoints except the development token endpoint require `Authorization: Bearer <JWT>`. Successful resource responses use `{ "data": ... }`. Paginated responses also contain `{ "page": { "limit": 25, "nextCursor": null } }`. Errors use `{ "error": string, "requestId": string }` and include validation details when applicable.
 
 Protected endpoints can return `400` for invalid input, `401` for missing or invalid authentication, `403` for insufficient permissions, and `500` for unexpected errors. Resource-specific `404` and `409` responses are noted below.
