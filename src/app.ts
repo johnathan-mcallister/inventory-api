@@ -240,8 +240,6 @@ const pageResponse = <T>(
 /**
  * Build Fastify application
  *
- * The default inventory repository is now in-memory.
- * No MySQL repository is initialized here.
  */
 export async function buildApp(
   repository: InventoryRepository =
