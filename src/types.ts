@@ -220,6 +220,12 @@ export interface InventoryRepository {
   createMaintenance(tenantId: string, record: CreateMaintenance): Promise<MaintenanceRecord>;
   updateMaintenance(tenantId: string, maintenanceId: number, patch: UpdateMaintenance): Promise<MaintenanceRecord | undefined>;
   resolveMaintenance(tenantId: string, maintenanceId: number, resolvedDate: string): Promise<MaintenanceRecord | undefined>;
+  
+  findAccountByEmail(tenantId: string,email: string): Promise<Account | undefined>;
+  listAccounts(tenantId: string): Promise<Account[]>;
+  getAccount(tenantId: string,accountId: number): Promise<Account | undefined>;
+  createAccount(tenantId: string, account: CreateAccount): Promise<Account>;
+  updateAccount(tenantId: string, accountId: number, patch: UpdateAccount): Promise<Account | undefined>;
 }
 
 // -----------------------------------------------------------------------------
