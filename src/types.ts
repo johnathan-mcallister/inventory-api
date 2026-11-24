@@ -154,6 +154,32 @@ export type UpdateMaintenance = {
   issueDescription?: string;
   maintenanceStatus?: "IN_PROGRESS";
 };
+// -----------------------------------------------------------------------------
+// User accounts
+// -----------------------------------------------------------------------------
+
+export type AccountRole = "ADMIN" | "STAFF";
+export type AccountStatus = "Active" | "Inactive";
+
+export interface Account {
+  id: number;
+  name: string;
+  email: string;
+  role: AccountRole;
+  status: AccountStatus;
+  passwordHash: string;
+  passwordSalt: string;
+  lastLogin: string | null;
+}
+
+export type CreateAccount = Omit<
+  Account,
+  "id" | "lastLogin"
+>;
+
+export type UpdateAccount = Partial<
+  Pick<Account, "name" | "role" | "status" | "lastLogin">
+>;
 
 // -----------------------------------------------------------------------------
 // Repository boundary
