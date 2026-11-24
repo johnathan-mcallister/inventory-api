@@ -3,35 +3,19 @@ import Fastify, {
   type FastifyRequest
 } from "fastify";
 
-import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
+import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
 import rateLimit from "@fastify/rate-limit";
-import { readFile } from "node:fs/promises";
 import { z } from "zod";
 
-import { hashPassword } from "./password.js";
-
 import {
-  createRequest,
-  getRequest,
-  listRequests,
-  revertToPending,
-  transitionPending
-} from "./request-service.js";
+  randomBytes,
+  scryptSync,
+  timingSafeEqual
+} from "node:crypto";
 
 import { InMemoryInventoryRepository } from "./repository.js";
-
-import {
-  authenticateUser,
-  createAccount,
-  findActiveRegularUser,
-  listUsers,
-  registerUser,
-  ROLE_PERMISSIONS,
-  seedLocalDemoAccounts,
-  setUserActive
-} from "./auth-service.js";
 
 import {
   DEVICE_STATUSES,
@@ -41,27 +25,32 @@ import {
   type InventoryRepository
 } from "./types.js";
 
-/**
- * JWT type definitions
- */
+// --------------------------------------------------
+// JWT TYPES
+// --------------------------------------------------
+
 declare module "@fastify/jwt" {
   interface FastifyJWT {
     payload: {
-      sub?: string;
       tenantId: string;
-      permissions: string[];
+      roles: string[];
+      userId?: number;
+      role?: "ADMIN" | "STAFF";
     };
+
     user: {
-      sub?: string;
       tenantId: string;
-      permissions: string[];
+      roles: string[];
+      userId?: number;
+      role?: "ADMIN" | "STAFF";
     };
   }
 }
 
-/**
- * Validation helpers
- */
+// --------------------------------------------------
+// VALIDATION SCHEMAS
+// --------------------------------------------------
+
 const positiveId = z.coerce.number().int().positive();
 
 const deviceType = z.enum(DEVICE_TYPES);
@@ -69,116 +58,128 @@ const deviceStatus = z.enum(DEVICE_STATUSES);
 const loanStatus = z.enum(LOAN_STATUSES);
 const maintenanceStatus = z.enum(MAINTENANCE_STATUSES);
 
-const date = z
-  .string()
+const date = z.string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Expected YYYY-MM-DD")
   .refine(
-    (value) =>
-      !Number.isNaN(Date.parse(`${value}T00:00:00Z`)),
+    (v) => !Number.isNaN(Date.parse(`${v}T00:00:00Z`)),
     "Invalid date"
   );
 
-const dateTime = z.string().datetime({
-  offset: true
-});
+const dateTime = z.string().datetime({ offset: true });
 
 const pagination = {
   cursor: positiveId.optional(),
-  limit: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(100)
-    .default(25)
+  limit: z.coerce.number().int().min(1).max(100).default(25)
 };
 
 const nonempty = (max: number) =>
   z.string().trim().min(1).max(max);
 
-const registerBodySchema = z.object({
-  email: z.string().trim().toLowerCase().email().max(255),
-  password: z.string().min(12).max(256)
-}).strict();
-
-const loginBodySchema = z.object({
-  email: z.string().trim().email().max(255),
-  password: z.string().min(1).max(256)
-}).strict();
-
 const idParams = (name: string) =>
-  z.object({
-    [name]: positiveId
-  });
+  z.object({ [name]: positiveId });
 
-/**
- * Request bodies
- */
-const deviceBody = z
-  .object({
-    assetTag: nonempty(50),
-    serialNumber: nonempty(100),
-    deviceType,
-    manufacturer: nonempty(100),
-    model: nonempty(100),
-    status: deviceStatus,
-    centerId: positiveId
-  })
-  .strict();
+const deviceBody = z.object({
+  assetTag: nonempty(50),
+  serialNumber: nonempty(100),
+  deviceType,
+  manufacturer: nonempty(100),
+  model: nonempty(100),
+  status: deviceStatus,
+  centerId: positiveId
+}).strict();
 
-const centerBody = z
-  .object({
-    centerName: nonempty(100),
-    address: nonempty(255),
-    phone: nonempty(20),
-    isActive: z.boolean()
-  })
-  .strict();
+const centerBody = z.object({
+  centerName: nonempty(100),
+  address: nonempty(255),
+  phone: nonempty(20),
+  isActive: z.boolean()
+}).strict();
 
-const loanBody = z
-  .object({
-    deviceId: positiveId,
-    centerId: positiveId,
-    reasonId: positiveId,
-    participantCode: nonempty(50).optional(),
-    userId: positiveId.optional(),
-    checkoutDate: dateTime,
-    dueDate: dateTime
-  })
-  .strict()
-  .refine(
-    (value) => value.dueDate > value.checkoutDate,
-    {
-      message: "dueDate must be after checkoutDate",
-      path: ["dueDate"]
-    }
-  )
-  .refine(
-    (value) =>
-      value.participantCode !== undefined ||
-      value.userId !== undefined,
-    {
-      message: "Provide a participantCode or a userId",
-      path: ["participantCode"]
-    }
-  );
+const loanBody = z.object({
+  deviceId: positiveId,
+  centerId: positiveId,
+  reasonId: positiveId,
+  participantCode: nonempty(50),
+  checkoutDate: dateTime,
+  dueDate: dateTime
+}).strict().refine(
+  (x) => x.dueDate > x.checkoutDate,
+  {
+    message: "dueDate must be after checkoutDate",
+    path: ["dueDate"]
+  }
+);
 
-const maintenanceBody = z
-  .object({
-    deviceId: positiveId,
-    issueDescription: nonempty(65535),
-    serviceDate: date
-  })
-  .strict();
+const maintenanceBody = z.object({
+  deviceId: positiveId,
+  issueDescription: nonempty(65535),
+  serviceDate: date
+}).strict();
 
-/**
- * Development token permissions:
- * everything an admin can do.
- */
-const developmentRoles = [...ROLE_PERMISSIONS.ADMIN];
+// --------------------------------------------------
+// PERMISSIONS
+// --------------------------------------------------
 
-/**
- * Validation function
- */
+const resourceRoles = [
+  "inventory:read",
+  "inventory:write",
+  "loans:read",
+  "loans:write",
+  "centers:read",
+  "centers:write",
+  "maintenance:read",
+  "maintenance:write",
+  "loan-reasons:read",
+  "loan-reasons:write"
+];
+
+const adminRoles = [
+  ...resourceRoles,
+  "users:manage"
+];
+
+// --------------------------------------------------
+// USER ACCOUNT AND PASSWORD SECURITY
+// --------------------------------------------------
+
+const passwordSchema = z.string()
+  .min(12, "Password must contain at least 12 characters")
+  .max(200);
+
+type Account = {
+  id: number;
+  tenantId: string;
+  name: string;
+  email: string;
+  role: "ADMIN" | "STAFF";
+  status: "Active" | "Inactive";
+  passwordHash: string;
+  passwordSalt: string;
+  lastLogin: string | null;
+};
+
+function hashPassword(
+  password: string,
+  salt: string
+): string {
+  return scryptSync(password, salt, 64).toString("hex");
+}
+
+function safeAccount(account: Account) {
+  return {
+    id: account.id,
+    name: account.name,
+    email: account.email,
+    role: account.role,
+    status: account.status,
+    lastLogin: account.lastLogin
+  };
+}
+
+// --------------------------------------------------
+// GENERAL HELPERS
+// --------------------------------------------------
+
 function parse<S extends z.ZodTypeAny>(
   schema: S,
   value: unknown
@@ -198,31 +199,22 @@ function parse<S extends z.ZodTypeAny>(
   return result.data;
 }
 
-/**
- * Role authorization
- */
-function requirePermission(
+function requireRole(
   request: FastifyRequest,
-  permission: string
+  role: string
 ) {
-  if (!request.user.permissions?.includes(permission)) {
+  if (!request.user.roles.includes(role)) {
     throw Object.assign(
       new Error("Insufficient permissions"),
-      {
-        statusCode: 403
-      }
+      { statusCode: 403 }
     );
   }
 }
 
-const authorize = (permission: string) =>
-  async (request: FastifyRequest) => {
-    requirePermission(request, permission);
-  };
+const authorize = (role: string) =>
+  async (request: FastifyRequest) =>
+    requireRole(request, role);
 
-/**
- * Pagination response
- */
 const pageResponse = <T>(
   result: {
     items: T[];
@@ -237,14 +229,15 @@ const pageResponse = <T>(
   }
 });
 
-/**
- * Build Fastify application
- *
- */
+// --------------------------------------------------
+// APPLICATION
+// --------------------------------------------------
+
 export async function buildApp(
   repository: InventoryRepository =
     new InMemoryInventoryRepository()
 ): Promise<FastifyInstance> {
+
   const app = Fastify({
     logger: {
       redact: [
@@ -255,9 +248,10 @@ export async function buildApp(
     }
   });
 
-  /**
-   * Environment configuration
-   */
+  // ------------------------------------------------
+  // ENVIRONMENT CONFIGURATION
+  // ------------------------------------------------
+
   const secret = process.env.JWT_SECRET;
 
   if (!secret || secret.length < 32) {
@@ -266,133 +260,161 @@ export async function buildApp(
     );
   }
 
-  await seedLocalDemoAccounts();
+  const tenantId =
+    process.env.DEMO_TENANT_ID ?? "eigen-it";
 
-  /**
-   * Security middleware
-   */
+  // ------------------------------------------------
+  // PLUGINS
+  // ------------------------------------------------
+
   await app.register(helmet, {
     contentSecurityPolicy: false
   });
 
-  /**
-   * CORS
-   */
- const allowedOrigins = [
-  "http://localhost:5500",
-  "http://127.0.0.1:5500",
-  process.env.FRONTEND_URL
-].filter((origin): origin is string => Boolean(origin));
+  // PATCH is required by the existing update endpoints.
+  // Restrict the origin to the frontend domain in production.
+  const allowedOrigin = process.env.FRONTEND_ORIGIN;
 
-await app.register(cors, {
-  origin: allowedOrigins,
-  methods: [
-    "GET",
-    "POST",
-    "PATCH",
-    "OPTIONS"
-  ],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization"
-  ],
-  credentials: false
-});
-  /**
-   * Rate limiting
-   */
+  await app.register(cors, {
+    origin:
+      process.env.NODE_ENV === "production" && allowedOrigin
+        ? allowedOrigin
+        : "*",
+    methods: [
+      "GET",
+      "HEAD",
+      "POST",
+      "PATCH",
+      "OPTIONS"
+    ]
+  });
+
   await app.register(rateLimit, {
     max: 120,
     timeWindow: "1 minute"
   });
 
-  /**
-   * JWT authentication
-   */
   await app.register(jwt, {
     secret
   });
 
-  /**
-   * Global error handler
-   */
-  app.setErrorHandler(
-    (error, request, reply) => {
-      request.log.warn(
-        {
-          err: error,
-          requestId: request.id
-        },
-        `Request failed: ${request.method} ${
-          request.url.split("?")[0]
-        } - ${
-          (error as { code?: string }).code ?? ""
-        } ${
-          (error as { sqlMessage?: string }).sqlMessage ??
-          (error as Error).message
-        }`
-      );
+  // ------------------------------------------------
+  // ERROR HANDLER
+  // ------------------------------------------------
 
-      const known = error as Error & {
-        statusCode?: number;
-        issues?: unknown;
-      };
+  app.setErrorHandler((error, request, reply) => {
+    request.log.warn(
+      {
+        err: error,
+        requestId: request.id
+      },
+      "Request failed"
+    );
 
-      const statusCode =
-        known.statusCode &&
-        known.statusCode >= 400
-          ? known.statusCode
-          : 500;
+    const known = error as Error & {
+      statusCode?: number;
+      issues?: unknown;
+    };
 
-      reply
-        .code(statusCode)
-        .send({
-          error:
-            statusCode === 500
-              ? "Internal server error"
-              : known.message,
-          requestId: request.id,
-          ...(known.issues
-            ? {
-                details: known.issues
-              }
-            : {})
-        });
-    }
-  );
+    const statusCode =
+      known.statusCode && known.statusCode >= 400
+        ? known.statusCode
+        : 500;
 
-  /**
-   * Staff portal
-   */
-  const portalUrl = new URL(
-    "../frontend/index.html",
-    import.meta.url
-  );
-
-  app.get("/", async (_request, reply) => {
-    const html = await readFile(portalUrl, "utf8");
-
-    return reply
-      .header(
-        "Cache-Control",
-        "no-store, no-cache, must-revalidate"
-      )
-      .type("text/html; charset=utf-8")
-      .send(html);
+    reply.code(statusCode).send({
+      error:
+        statusCode === 500
+          ? "Internal server error"
+          : known.message,
+      requestId: request.id,
+      ...(known.issues
+        ? { details: known.issues }
+        : {})
+    });
   });
 
-  /**
-   * Health check
-   */
+  // ------------------------------------------------
+  // HEALTH CHECK
+  // ------------------------------------------------
+
   app.get("/health", async () => ({
     status: "ok"
   }));
 
-  /**
-   * ============================
-   * AUTHENTICATION
-   * ============================
-   */
+  // ------------------------------------------------
+  // USER ACCOUNT STORAGE
+  //
+  // NOTE:
+  // This is temporary in-memory storage.
+  // Accounts are lost when the application restarts.
+  // Replace with persistent database storage before
+  // relying on this system for permanent accounts.
+  // ------------------------------------------------
+
+  const accounts = new Map<number, Account>();
+
+  let nextAccountId = 1;
+
+  // ------------------------------------------------
+  // INITIAL ADMINISTRATOR
+  // ------------------------------------------------
+
+  const adminEmail = process.env.ADMIN_EMAIL
+    ?.trim()
+    .toLowerCase();
+
+  const adminPassword = process.env.ADMIN_PASSWORD;
+
+  if (adminEmail && adminPassword) {
+
+    if (adminPassword.length < 12) {
+      throw new Error(
+        "ADMIN_PASSWORD must be at least 12 characters"
+      );
+    }
+
+    const salt = randomBytes(16).toString("hex");
+
+    const admin: Account = {
+      id: nextAccountId++,
+      tenantId,
+      name:
+        process.env.ADMIN_NAME?.trim() ||
+        "System Administrator",
+      email: adminEmail,
+      role: "ADMIN",
+      status: "Active",
+      passwordSalt: salt,
+      passwordHash: hashPassword(
+        adminPassword,
+        salt
+      ),
+      lastLogin: null
+    };
+
+    accounts.set(admin.id, admin);
+  }
+
+  // ------------------------------------------------
+  // AUTHENTICATION HOOK
+  // ------------------------------------------------
+
+  app.addHook("onRequest", async (request) => {
+
+    if (
+      !request.url.startsWith("/v1/") ||
+      request.url === "/v1/dev/token" ||
+      request.url === "/v1/auth/login"
+    ) {
+      return;
+    }
+
+    await request.jwtVerify();
+  });
+
+  // ------------------------------------------------
+  // LOGIN
+  // ------------------------------------------------
 
   app.post(
     "/v1/auth/login",
@@ -405,228 +427,190 @@ await app.register(cors, {
       }
     },
     async (request, reply) => {
+
       const body = parse(
-        loginBodySchema,
+        z.object({
+          email: z.string().email().max(160),
+          password: z.string().min(1).max(200)
+        }).strict(),
         request.body
       );
 
-      const result = await authenticateUser(
-        body.email,
-        body.password,
-        request.id
+      const email = body.email
+        .trim()
+        .toLowerCase();
+
+      const account = [...accounts.values()].find(
+        (item) =>
+          item.tenantId === tenantId &&
+          item.email === email
       );
 
-      if (!result.success) {
+      if (
+        !account ||
+        account.status !== "Active"
+      ) {
         return reply.code(401).send({
           error: "Invalid email or password",
           requestId: request.id
         });
       }
 
-      const permissions = result.user.permissions;
+      const actual = Buffer.from(
+        hashPassword(
+          body.password,
+          account.passwordSalt
+        ),
+        "hex"
+      );
+
+      const expected = Buffer.from(
+        account.passwordHash,
+        "hex"
+      );
+
+      if (
+        actual.length !== expected.length ||
+        !timingSafeEqual(actual, expected)
+      ) {
+        return reply.code(401).send({
+          error: "Invalid email or password",
+          requestId: request.id
+        });
+      }
+
+      account.lastLogin = new Date().toISOString();
+
+      const roles =
+        account.role === "ADMIN"
+          ? adminRoles
+          : resourceRoles;
 
       const token = await reply.jwtSign(
         {
-          sub: result.user.id,
-          tenantId: result.user.tenantId,
-          permissions
+          tenantId: account.tenantId,
+          roles,
+          userId: account.id,
+          role: account.role
         },
         {
-          expiresIn: "15m"
+          expiresIn: "8h"
         }
       );
 
       return {
         token,
-        tokenType: "Bearer",
-        expiresIn: "15m",
-        user: {
-          id: result.user.id,
-          email: result.user.email,
-          role: result.user.role,
-          permissions
-        }
+        expiresIn: 28800,
+        user: safeAccount(account)
       };
     }
   );
 
-  /**
-   * Public registration:
-   * new accounts receive the USER role.
-   */
-  app.post(
-    "/v1/auth/register",
-    {
-      config: {
-        rateLimit: {
-          max: 5,
-          timeWindow: "1 minute"
-        }
-      }
-    },
-    async (request, reply) => {
-      const body = parse(
-        registerBodySchema,
-        request.body
-      );
+  // ------------------------------------------------
+  // USER MANAGEMENT: LIST USERS
+  // ADMIN ONLY
+  // ------------------------------------------------
 
-      const passwordHash = await hashPassword(
-        body.password
-      );
-
-      const result = await registerUser(
-        body.email,
-        passwordHash,
-        request.id
-      );
-
-      if (!result.success) {
-        throw Object.assign(
-          new Error("An account with that email already exists"),
-          {
-            statusCode: 409
-          }
-        );
-      }
-
-      const token = await reply.jwtSign(
-        {
-          sub: result.user.id,
-          tenantId: result.user.tenantId,
-          permissions: result.user.permissions
-        },
-        {
-          expiresIn: "15m"
-        }
-      );
-
-      return reply.code(201).send({
-        token,
-        tokenType: "Bearer",
-        expiresIn: "15m",
-        user: {
-          id: result.user.id,
-          email: result.user.email,
-          role: result.user.role,
-          permissions: result.user.permissions
-        }
-      });
-    }
-  );
-
-  /**
-   * JWT authentication hook
-   */
-  app.addHook(
-    "onRequest",
-    async (request) => {
-      const pathname =
-        request.url.split("?")[0] ?? request.url;
-
-      if (
-        !pathname.startsWith("/v1/") ||
-        pathname === "/v1/dev/token" ||
-        pathname === "/v1/auth/login" ||
-        pathname === "/v1/auth/register"
-      ) {
-        return;
-      }
-
-      await request.jwtVerify();
-    }
-  );
-
-  /**
-   * ============================
-   * USERS
-   * ============================
-   */
-
-  const userBody = z
-    .object({
-      email: z.string().trim().toLowerCase().email().max(255),
-      password: z.string().min(12).max(256),
-      role: z.enum(["ADMIN", "STAFF", "USER"])
-    })
-    .strict();
-
-  /**
-   * List users.
-   * Staff can see regular users.
-   * Admins can see all accounts.
-   */
   app.get(
     "/v1/users",
     {
-      preHandler: authorize("users:read")
+      preHandler: authorize("users:manage")
     },
     async (request) => {
-      const isAdmin =
-        request.user.permissions.includes("users:write");
 
       return {
-        data: listUsers(
-          request.user.tenantId,
-          isAdmin
-        )
+        data: [...accounts.values()]
+          .filter(
+            (account) =>
+              account.tenantId ===
+              request.user.tenantId
+          )
+          .map(safeAccount)
       };
     }
   );
 
-  /**
-   * Create user.
-   */
+  // ------------------------------------------------
+  // USER MANAGEMENT: CREATE USER
+  // ADMIN ONLY
+  // ------------------------------------------------
+
   app.post(
-    "/v1/users",
+    "/v1/auth/register",
     {
-      preHandler: authorize("users:write")
+      preHandler: authorize("users:manage")
     },
     async (request, reply) => {
+
       const body = parse(
-        userBody,
+        z.object({
+          name: nonempty(100),
+          email: z.string().email().max(160),
+          password: passwordSchema,
+          role: z.enum(["ADMIN", "STAFF"]),
+          status: z.enum([
+            "Active",
+            "Inactive"
+          ]).default("Active")
+        }).strict(),
         request.body
       );
 
-      const passwordHash = await hashPassword(
-        body.password
+      const email = body.email
+        .trim()
+        .toLowerCase();
+
+      const exists = [...accounts.values()].some(
+        (account) =>
+          account.tenantId ===
+            request.user.tenantId &&
+          account.email === email
       );
 
-      const result = await createAccount(
-        request.user.tenantId,
-        body.email,
-        passwordHash,
-        body.role
-      );
-
-      if (!result.success) {
-        throw Object.assign(
-          new Error("A user with that email already exists"),
-          {
-            statusCode: 409
-          }
-        );
+      if (exists) {
+        return reply.code(409).send({
+          error: "A user with that email already exists",
+          requestId: request.id
+        });
       }
 
+      const salt = randomBytes(16).toString("hex");
+
+      const account: Account = {
+        id: nextAccountId++,
+        tenantId: request.user.tenantId,
+        name: body.name.trim(),
+        email,
+        role: body.role,
+        status: body.status,
+        passwordSalt: salt,
+        passwordHash: hashPassword(
+          body.password,
+          salt
+        ),
+        lastLogin: null
+      };
+
+      accounts.set(account.id, account);
+
       return reply.code(201).send({
-        data: {
-          userId: Number(result.user.id),
-          email: result.user.email,
-          role: result.user.role,
-          isActive: true
-        }
+        data: safeAccount(account)
       });
     }
   );
 
-  /**
-   * Activate or deactivate user.
-   */
+  // ------------------------------------------------
+  // USER MANAGEMENT: UPDATE USER
+  // ADMIN ONLY
+  // ------------------------------------------------
+
   app.patch(
     "/v1/users/:userId",
     {
-      preHandler: authorize("users:write")
+      preHandler: authorize("users:manage")
     },
-    async (request) => {
+    async (request, reply) => {
+
       const { userId } = parse(
         idParams("userId"),
         request.params
@@ -636,118 +620,127 @@ await app.register(cors, {
 
       const body = parse(
         z.object({
-          isActive: z.boolean()
-        }).strict(),
+          name: nonempty(100).optional(),
+          role: z.enum([
+            "ADMIN",
+            "STAFF"
+          ]).optional(),
+          status: z.enum([
+            "Active",
+            "Inactive"
+          ]).optional()
+        }).strict().refine(
+          (value) =>
+            Object.keys(value).length > 0,
+          "At least one field is required"
+        ),
         request.body
       );
 
+      const account = accounts.get(userId);
+
       if (
-        String(userId) === String(request.user.sub) &&
-        !body.isActive
+        !account ||
+        account.tenantId !==
+          request.user.tenantId
       ) {
-        throw Object.assign(
-          new Error("You cannot deactivate your own account"),
-          {
-            statusCode: 400
-          }
-        );
+        return reply.code(404).send({
+          error: "User not found",
+          requestId: request.id
+        });
       }
 
-      const updated = setUserActive(
-        request.user.tenantId,
-        userId,
-        body.isActive
-      );
-
-      if (!updated) {
-        throw Object.assign(
-          new Error("User not found"),
-          {
-            statusCode: 404
-          }
-        );
+      if (
+        request.user.userId === userId &&
+        (
+          body.role === "STAFF" ||
+          body.status === "Inactive"
+        )
+      ) {
+        return reply.code(400).send({
+          error:
+            "You cannot remove your own administrator access or deactivate your own account",
+          requestId: request.id
+        });
       }
+
+      Object.assign(account, body);
 
       return {
-        data: {
-          userId,
-          isActive: body.isActive
-        }
+        data: safeAccount(account)
       };
     }
   );
 
-  /**
-   * ============================
-   * INVENTORY / DEVICES
-   * ============================
-   */
+  // ------------------------------------------------
+  // INVENTORY
+  // ------------------------------------------------
 
-  const deviceQuery = z
-    .object({
-      deviceType: deviceType.optional(),
-      status: deviceStatus.optional(),
-      centerId: positiveId.optional(),
-      assetTag: nonempty(50).optional(),
-      serialNumber: nonempty(100).optional(),
-      manufacturer: nonempty(100).optional(),
-      model: nonempty(100).optional(),
-      search: nonempty(120).optional(),
-      ...pagination
-    })
-    .strict();
+  const deviceQuery = z.object({
+    deviceType: deviceType.optional(),
+    status: deviceStatus.optional(),
+    centerId: positiveId.optional(),
+    assetTag: nonempty(50).optional(),
+    serialNumber: nonempty(100).optional(),
+    manufacturer: nonempty(100).optional(),
+    model: nonempty(100).optional(),
+    search: nonempty(120).optional(),
+    ...pagination
+  }).strict();
 
+  // List inventory
   app.get(
     "/v1/inventory",
     {
       preHandler: authorize("inventory:read")
     },
     async (request) => {
-      const query = parse(
+
+      const q = parse(
         deviceQuery,
         request.query
       );
 
-      const result = await repository.listDevices(
-        request.user.tenantId,
-        query
-      );
-
       return pageResponse(
-        result,
-        query.limit
+        await repository.listDevices(
+          request.user.tenantId,
+          q
+        ),
+        q.limit
       );
     }
   );
 
+  // Create inventory
   app.post(
     "/v1/inventory",
     {
       preHandler: authorize("inventory:write")
     },
     async (request, reply) => {
+
       const body = parse(
         deviceBody,
         request.body
       );
 
-      const data = await repository.createDevice(
-        request.user.tenantId,
-        body
-      );
-
       return reply.code(201).send({
-        data
+        data: await repository.createDevice(
+          request.user.tenantId,
+          body
+        )
       });
     }
   );
 
+  // Get inventory item
   app.get(
     "/v1/inventory/:deviceId",
     {
       preHandler: authorize("inventory:read")
     },
     async (request, reply) => {
+
       const { deviceId } = parse(
         idParams("deviceId"),
         request.params
@@ -760,25 +753,23 @@ await app.register(cors, {
         deviceId
       );
 
-      if (!data) {
-        return reply.code(404).send({
-          error: "Device not found",
-          requestId: request.id
-        });
-      }
-
-      return {
-        data
-      };
+      return data
+        ? { data }
+        : reply.code(404).send({
+            error: "Device not found",
+            requestId: request.id
+          });
     }
   );
 
+  // Update inventory item
   app.patch(
     "/v1/inventory/:deviceId",
     {
       preHandler: authorize("inventory:write")
     },
     async (request, reply) => {
+
       const { deviceId } = parse(
         idParams("deviceId"),
         request.params
@@ -788,17 +779,19 @@ await app.register(cors, {
 
       const body = parse(
         deviceBody
-          .omit({
-            status: true
-          })
+          .omit({ status: true })
           .partial()
           .refine(
-            (value) =>
-              Object.keys(value).length > 0,
+            (x) => Object.keys(x).length > 0,
             "At least one field is required"
           ),
         request.body
       );
+
+      /*
+       * Lifecycle status is intentionally not
+       * client-editable through this endpoint.
+       */
 
       const data = await repository.updateDevice(
         request.user.tenantId,
@@ -806,25 +799,23 @@ await app.register(cors, {
         body
       );
 
-      if (!data) {
-        return reply.code(404).send({
-          error: "Device not found",
-          requestId: request.id
-        });
-      }
-
-      return {
-        data
-      };
+      return data
+        ? { data }
+        : reply.code(404).send({
+            error: "Device not found",
+            requestId: request.id
+          });
     }
   );
 
+  // Device history
   app.get(
     "/v1/inventory/:deviceId/history",
     {
       preHandler: authorize("inventory:read")
     },
     async (request, reply) => {
+
       const { deviceId } = parse(
         idParams("deviceId"),
         request.params
@@ -832,34 +823,36 @@ await app.register(cors, {
         deviceId: number;
       };
 
-      const device = await repository.getDevice(
-        request.user.tenantId,
-        deviceId
-      );
-
-      if (!device) {
+      if (
+        !await repository.getDevice(
+          request.user.tenantId,
+          deviceId
+        )
+      ) {
         return reply.code(404).send({
           error: "Device not found",
           requestId: request.id
         });
       }
 
-      const [loans, maintenance] = await Promise.all([
-        repository.listLoans(
-          request.user.tenantId,
-          {
-            deviceId,
-            limit: 100
-          }
-        ),
-        repository.listMaintenance(
-          request.user.tenantId,
-          {
-            deviceId,
-            limit: 100
-          }
-        )
-      ]);
+      const [loans, maintenance] =
+        await Promise.all([
+          repository.listLoans(
+            request.user.tenantId,
+            {
+              deviceId,
+              limit: 100
+            }
+          ),
+
+          repository.listMaintenance(
+            request.user.tenantId,
+            {
+              deviceId,
+              limit: 100
+            }
+          )
+        ]);
 
       return {
         data: {
@@ -870,12 +863,14 @@ await app.register(cors, {
     }
   );
 
+  // Device maintenance
   app.get(
     "/v1/inventory/:deviceId/maintenance",
     {
       preHandler: authorize("maintenance:read")
     },
     async (request, reply) => {
+
       const { deviceId } = parse(
         idParams("deviceId"),
         request.params
@@ -883,106 +878,99 @@ await app.register(cors, {
         deviceId: number;
       };
 
-      const device = await repository.getDevice(
-        request.user.tenantId,
-        deviceId
-      );
-
-      if (!device) {
+      if (
+        !await repository.getDevice(
+          request.user.tenantId,
+          deviceId
+        )
+      ) {
         return reply.code(404).send({
           error: "Device not found",
           requestId: request.id
         });
       }
 
-      const query = parse(
+      const q = parse(
         z.object(pagination).strict(),
         request.query
       );
 
-      const result = await repository.listMaintenance(
-        request.user.tenantId,
-        {
-          ...query,
-          deviceId
-        }
-      );
-
       return pageResponse(
-        result,
-        query.limit
+        await repository.listMaintenance(
+          request.user.tenantId,
+          {
+            ...q,
+            deviceId
+          }
+        ),
+        q.limit
       );
     }
   );
 
-  /**
-   * ============================
-   * OUTREACH CENTERS
-   * ============================
-   */
+  // ------------------------------------------------
+  // OUTREACH CENTERS
+  // ------------------------------------------------
 
-  const centerQuery = z
-    .object({
-      isActive: z
-        .enum(["true", "false"])
-        .transform((value) => value === "true")
-        .optional(),
-      search: nonempty(120).optional(),
-      ...pagination
-    })
-    .strict();
+  const centerQuery = z.object({
+    isActive: z.enum([
+      "true",
+      "false"
+    ]).transform(
+      (x) => x === "true"
+    ).optional(),
+    search: nonempty(120).optional(),
+    ...pagination
+  }).strict();
 
+  // List centers
   app.get(
     "/v1/centers",
     {
       preHandler: authorize("centers:read")
     },
     async (request) => {
-      const query = parse(
+
+      const q = parse(
         centerQuery,
         request.query
       );
 
-      const result = await repository.listCenters(
-        request.user.tenantId,
-        query
-      );
-
       return pageResponse(
-        result,
-        query.limit
+        await repository.listCenters(
+          request.user.tenantId,
+          q
+        ),
+        q.limit
       );
     }
   );
 
+  // Create center
   app.post(
     "/v1/centers",
     {
       preHandler: authorize("centers:write")
     },
     async (request, reply) => {
-      const body = parse(
-        centerBody,
-        request.body
-      );
-
-      const data = await repository.createCenter(
-        request.user.tenantId,
-        body
-      );
 
       return reply.code(201).send({
-        data
+        data: await repository.createCenter(
+          request.user.tenantId,
+          parse(centerBody, request.body)
+        )
       });
     }
   );
 
+  // Get center
   app.get(
     "/v1/centers/:centerId",
     {
       preHandler: authorize("centers:read")
     },
     async (request, reply) => {
+
       const { centerId } = parse(
         idParams("centerId"),
         request.params
@@ -995,25 +983,23 @@ await app.register(cors, {
         centerId
       );
 
-      if (!data) {
-        return reply.code(404).send({
-          error: "Center not found",
-          requestId: request.id
-        });
-      }
-
-      return {
-        data
-      };
+      return data
+        ? { data }
+        : reply.code(404).send({
+            error: "Center not found",
+            requestId: request.id
+          });
     }
   );
 
+  // Update center
   app.patch(
     "/v1/centers/:centerId",
     {
       preHandler: authorize("centers:write")
     },
     async (request, reply) => {
+
       const { centerId } = parse(
         idParams("centerId"),
         request.params
@@ -1022,13 +1008,10 @@ await app.register(cors, {
       };
 
       const body = parse(
-        centerBody
-          .partial()
-          .refine(
-            (value) =>
-              Object.keys(value).length > 0,
-            "At least one field is required"
-          ),
+        centerBody.partial().refine(
+          (x) => Object.keys(x).length > 0,
+          "At least one field is required"
+        ),
         request.body
       );
 
@@ -1038,25 +1021,23 @@ await app.register(cors, {
         body
       );
 
-      if (!data) {
-        return reply.code(404).send({
-          error: "Center not found",
-          requestId: request.id
-        });
-      }
-
-      return {
-        data
-      };
+      return data
+        ? { data }
+        : reply.code(404).send({
+            error: "Center not found",
+            requestId: request.id
+          });
     }
   );
 
+  // Center inventory
   app.get(
     "/v1/centers/:centerId/inventory",
     {
       preHandler: authorize("inventory:read")
     },
     async (request, reply) => {
+
       const { centerId } = parse(
         idParams("centerId"),
         request.params
@@ -1064,44 +1045,44 @@ await app.register(cors, {
         centerId: number;
       };
 
-      const center = await repository.getCenter(
-        request.user.tenantId,
-        centerId
-      );
-
-      if (!center) {
+      if (
+        !await repository.getCenter(
+          request.user.tenantId,
+          centerId
+        )
+      ) {
         return reply.code(404).send({
           error: "Center not found",
           requestId: request.id
         });
       }
 
-      const query = parse(
+      const q = parse(
         z.object(pagination).strict(),
         request.query
       );
 
-      const result = await repository.listDevices(
-        request.user.tenantId,
-        {
-          ...query,
-          centerId
-        }
-      );
-
       return pageResponse(
-        result,
-        query.limit
+        await repository.listDevices(
+          request.user.tenantId,
+          {
+            ...q,
+            centerId
+          }
+        ),
+        q.limit
       );
     }
   );
 
+  // Center loans
   app.get(
     "/v1/centers/:centerId/loans",
     {
       preHandler: authorize("loans:read")
     },
     async (request, reply) => {
+
       const { centerId } = parse(
         idParams("centerId"),
         request.params
@@ -1109,134 +1090,101 @@ await app.register(cors, {
         centerId: number;
       };
 
-      const center = await repository.getCenter(
-        request.user.tenantId,
-        centerId
-      );
-
-      if (!center) {
+      if (
+        !await repository.getCenter(
+          request.user.tenantId,
+          centerId
+        )
+      ) {
         return reply.code(404).send({
           error: "Center not found",
           requestId: request.id
         });
       }
 
-      const query = parse(
+      const q = parse(
         z.object(pagination).strict(),
         request.query
       );
 
-      const result = await repository.listLoans(
-        request.user.tenantId,
-        {
-          ...query,
-          centerId
-        }
-      );
-
       return pageResponse(
-        result,
-        query.limit
+        await repository.listLoans(
+          request.user.tenantId,
+          {
+            ...q,
+            centerId
+          }
+        ),
+        q.limit
       );
     }
   );
 
-  /**
-   * ============================
-   * LOANS
-   * ============================
-   */
+  // ------------------------------------------------
+  // LOANS
+  // ------------------------------------------------
 
-  const loanQuery = z
-    .object({
-      loanStatus: loanStatus.optional(),
-      centerId: positiveId.optional(),
-      deviceId: positiveId.optional(),
-      participantCode: nonempty(50).optional(),
-      reasonId: positiveId.optional(),
-      userId: positiveId.optional(),
-      checkoutFrom: dateTime.optional(),
-      checkoutTo: dateTime.optional(),
-      dueFrom: dateTime.optional(),
-      dueTo: dateTime.optional(),
-      ...pagination
-    })
-    .strict();
+  const loanQuery = z.object({
+    loanStatus: loanStatus.optional(),
+    centerId: positiveId.optional(),
+    deviceId: positiveId.optional(),
+    participantCode: nonempty(50).optional(),
+    reasonId: positiveId.optional(),
+    checkoutFrom: dateTime.optional(),
+    checkoutTo: dateTime.optional(),
+    dueFrom: dateTime.optional(),
+    dueTo: dateTime.optional(),
+    ...pagination
+  }).strict();
 
+  // List loans
   app.get(
     "/v1/loans",
     {
       preHandler: authorize("loans:read")
     },
     async (request) => {
-      const query = parse(
+
+      const q = parse(
         loanQuery,
         request.query
       );
 
-      const result = await repository.listLoans(
-        request.user.tenantId,
-        query
-      );
-
       return pageResponse(
-        result,
-        query.limit
+        await repository.listLoans(
+          request.user.tenantId,
+          q
+        ),
+        q.limit
       );
     }
   );
 
+  // Create loan
   app.post(
     "/v1/loans",
     {
-      preHandler: authorize("loans:assign")
+      preHandler: authorize("loans:write")
     },
     async (request, reply) => {
-      const body = parse(
-        loanBody,
-        request.body
-      );
-
-      let participantCode = body.participantCode;
-
-      if (body.userId !== undefined) {
-        const target = findActiveRegularUser(
-          request.user.tenantId,
-          body.userId
-        );
-
-        if (!target) {
-          throw Object.assign(
-            new Error("User not found or inactive"),
-            {
-              statusCode: 404
-            }
-          );
-        }
-
-        participantCode ??= target.email.slice(0, 50);
-      }
-
-      const data = await repository.createLoan(
-        request.user.tenantId,
-        {
-          ...body,
-          participantCode: participantCode as string
-        }
-      );
 
       return reply.code(201).send({
-        data
+        data: await repository.createLoan(
+          request.user.tenantId,
+          parse(loanBody, request.body)
+        )
       });
     }
   );
 
+  // Get loan
   app.get(
     "/v1/loans/:loanId",
     {
       preHandler: authorize("loans:read")
     },
     async (request, reply) => {
+
       const { loanId } = parse(
         idParams("loanId"),
         request.params
@@ -1256,20 +1204,23 @@ await app.register(cors, {
         });
       }
 
-      const [device, center, reason] = await Promise.all([
-        repository.getDevice(
-          request.user.tenantId,
-          loan.deviceId
-        ),
-        repository.getCenter(
-          request.user.tenantId,
-          loan.centerId
-        ),
-        repository.getLoanReason(
-          request.user.tenantId,
-          loan.reasonId
-        )
-      ]);
+      const [device, center, reason] =
+        await Promise.all([
+          repository.getDevice(
+            request.user.tenantId,
+            loan.deviceId
+          ),
+
+          repository.getCenter(
+            request.user.tenantId,
+            loan.centerId
+          ),
+
+          repository.getLoanReason(
+            request.user.tenantId,
+            loan.reasonId
+          )
+        ]);
 
       return {
         data: {
@@ -1282,12 +1233,14 @@ await app.register(cors, {
     }
   );
 
+  // Update loan
   app.patch(
     "/v1/loans/:loanId",
     {
       preHandler: authorize("loans:write")
     },
     async (request, reply) => {
+
       const { loanId } = parse(
         idParams("loanId"),
         request.params
@@ -1296,17 +1249,13 @@ await app.register(cors, {
       };
 
       const body = parse(
-        z
-          .object({
-            dueDate: dateTime.optional(),
-            reasonId: positiveId.optional()
-          })
-          .strict()
-          .refine(
-            (value) =>
-              Object.keys(value).length > 0,
-            "At least one field is required"
-          ),
+        z.object({
+          dueDate: dateTime.optional(),
+          reasonId: positiveId.optional()
+        }).strict().refine(
+          (x) => Object.keys(x).length > 0,
+          "At least one field is required"
+        ),
         request.body
       );
 
@@ -1316,25 +1265,23 @@ await app.register(cors, {
         body
       );
 
-      if (!data) {
-        return reply.code(404).send({
-          error: "Loan not found",
-          requestId: request.id
-        });
-      }
-
-      return {
-        data
-      };
+      return data
+        ? { data }
+        : reply.code(404).send({
+            error: "Loan not found",
+            requestId: request.id
+          });
     }
   );
 
+  // Return loan
   app.post(
     "/v1/loans/:loanId/return",
     {
       preHandler: authorize("loans:write")
     },
     async (request, reply) => {
+
       const { loanId } = parse(
         idParams("loanId"),
         request.params
@@ -1342,42 +1289,35 @@ await app.register(cors, {
         loanId: number;
       };
 
-      const body = parse(
-        z
-          .object({
-            returnDate: dateTime.default(
-              () => new Date().toISOString()
-            )
-          })
-          .strict(),
+      const { returnDate } = parse(
+        z.object({
+          returnDate: dateTime.default(
+            () => new Date().toISOString()
+          )
+        }).strict(),
         request.body ?? {}
       );
 
       const data = await repository.returnLoan(
         request.user.tenantId,
         loanId,
-        body.returnDate
+        returnDate
       );
 
-      if (!data) {
-        return reply.code(404).send({
-          error: "Loan not found",
-          requestId: request.id
-        });
-      }
-
-      return {
-        data
-      };
+      return data
+        ? { data }
+        : reply.code(404).send({
+            error: "Loan not found",
+            requestId: request.id
+          });
     }
   );
 
-  /**
-   * ============================
-   * LOAN REASONS
-   * ============================
-   */
+  // ------------------------------------------------
+  // LOAN REASONS
+  // ------------------------------------------------
 
+  // List loan reasons
   app.get(
     "/v1/loan-reasons",
     {
@@ -1390,38 +1330,38 @@ await app.register(cors, {
     })
   );
 
+  // Create loan reason
   app.post(
     "/v1/loan-reasons",
     {
       preHandler: authorize("loan-reasons:write")
     },
     async (request, reply) => {
-      const body = parse(
-        z
-          .object({
-            reasonName: nonempty(100)
-          })
-          .strict(),
+
+      const { reasonName } = parse(
+        z.object({
+          reasonName: nonempty(100)
+        }).strict(),
         request.body
       );
 
-      const data = await repository.createLoanReason(
-        request.user.tenantId,
-        body.reasonName
-      );
-
       return reply.code(201).send({
-        data
+        data: await repository.createLoanReason(
+          request.user.tenantId,
+          reasonName
+        )
       });
     }
   );
 
+  // Get loan reason
   app.get(
     "/v1/loan-reasons/:reasonId",
     {
       preHandler: authorize("loan-reasons:read")
     },
     async (request, reply) => {
+
       const { reasonId } = parse(
         idParams("reasonId"),
         request.params
@@ -1434,25 +1374,23 @@ await app.register(cors, {
         reasonId
       );
 
-      if (!data) {
-        return reply.code(404).send({
-          error: "Loan reason not found",
-          requestId: request.id
-        });
-      }
-
-      return {
-        data
-      };
+      return data
+        ? { data }
+        : reply.code(404).send({
+            error: "Loan reason not found",
+            requestId: request.id
+          });
     }
   );
 
+  // Update loan reason
   app.patch(
     "/v1/loan-reasons/:reasonId",
     {
       preHandler: authorize("loan-reasons:write")
     },
     async (request, reply) => {
+
       const { reasonId } = parse(
         idParams("reasonId"),
         request.params
@@ -1460,103 +1398,90 @@ await app.register(cors, {
         reasonId: number;
       };
 
-      const body = parse(
-        z
-          .object({
-            reasonName: nonempty(100)
-          })
-          .strict(),
+      const { reasonName } = parse(
+        z.object({
+          reasonName: nonempty(100)
+        }).strict(),
         request.body
       );
 
       const data = await repository.updateLoanReason(
         request.user.tenantId,
         reasonId,
-        body.reasonName
+        reasonName
       );
 
-      if (!data) {
-        return reply.code(404).send({
-          error: "Loan reason not found",
-          requestId: request.id
-        });
-      }
-
-      return {
-        data
-      };
+      return data
+        ? { data }
+        : reply.code(404).send({
+            error: "Loan reason not found",
+            requestId: request.id
+          });
     }
   );
 
-  /**
-   * ============================
-   * MAINTENANCE
-   * ============================
-   */
+  // ------------------------------------------------
+  // MAINTENANCE
+  // ------------------------------------------------
 
-  const maintenanceQuery = z
-    .object({
-      deviceId: positiveId.optional(),
-      maintenanceStatus: maintenanceStatus.optional(),
-      serviceFrom: date.optional(),
-      serviceTo: date.optional(),
-      resolvedFrom: date.optional(),
-      resolvedTo: date.optional(),
-      ...pagination
-    })
-    .strict();
+  const maintenanceQuery = z.object({
+    deviceId: positiveId.optional(),
+    maintenanceStatus: maintenanceStatus.optional(),
+    serviceFrom: date.optional(),
+    serviceTo: date.optional(),
+    resolvedFrom: date.optional(),
+    resolvedTo: date.optional(),
+    ...pagination
+  }).strict();
 
+  // List maintenance records
   app.get(
     "/v1/maintenance",
     {
       preHandler: authorize("maintenance:read")
     },
     async (request) => {
-      const query = parse(
+
+      const q = parse(
         maintenanceQuery,
         request.query
       );
 
-      const result = await repository.listMaintenance(
-        request.user.tenantId,
-        query
-      );
-
       return pageResponse(
-        result,
-        query.limit
+        await repository.listMaintenance(
+          request.user.tenantId,
+          q
+        ),
+        q.limit
       );
     }
   );
 
+  // Create maintenance record
   app.post(
     "/v1/maintenance",
     {
       preHandler: authorize("maintenance:write")
     },
     async (request, reply) => {
-      const body = parse(
-        maintenanceBody,
-        request.body
-      );
-
-      const data = await repository.createMaintenance(
-        request.user.tenantId,
-        body
-      );
 
       return reply.code(201).send({
-        data
+        data: await repository.createMaintenance(
+          request.user.tenantId,
+          parse(maintenanceBody, request.body)
+        )
       });
     }
   );
 
+  // Get maintenance record
   app.get(
     "/v1/maintenance/:maintenanceId",
     {
       preHandler: authorize("maintenance:read")
     },
     async (request, reply) => {
+
       const { maintenanceId } = parse(
         idParams("maintenanceId"),
         request.params
@@ -1569,25 +1494,23 @@ await app.register(cors, {
         maintenanceId
       );
 
-      if (!data) {
-        return reply.code(404).send({
-          error: "Maintenance record not found",
-          requestId: request.id
-        });
-      }
-
-      return {
-        data
-      };
+      return data
+        ? { data }
+        : reply.code(404).send({
+            error: "Maintenance record not found",
+            requestId: request.id
+          });
     }
   );
 
+  // Update maintenance record
   app.patch(
     "/v1/maintenance/:maintenanceId",
     {
       preHandler: authorize("maintenance:write")
     },
     async (request, reply) => {
+
       const { maintenanceId } = parse(
         idParams("maintenanceId"),
         request.params
@@ -1596,17 +1519,15 @@ await app.register(cors, {
       };
 
       const body = parse(
-        z
-          .object({
-            issueDescription: nonempty(65535).optional(),
-            maintenanceStatus: z.literal("IN_PROGRESS").optional()
-          })
-          .strict()
-          .refine(
-            (value) =>
-              Object.keys(value).length > 0,
-            "At least one field is required"
-          ),
+        z.object({
+          issueDescription: nonempty(65535).optional(),
+          maintenanceStatus: z.literal(
+            "IN_PROGRESS"
+          ).optional()
+        }).strict().refine(
+          (x) => Object.keys(x).length > 0,
+          "At least one field is required"
+        ),
         request.body
       );
 
@@ -1616,25 +1537,23 @@ await app.register(cors, {
         body
       );
 
-      if (!data) {
-        return reply.code(404).send({
-          error: "Maintenance record not found",
-          requestId: request.id
-        });
-      }
-
-      return {
-        data
-      };
+      return data
+        ? { data }
+        : reply.code(404).send({
+            error: "Maintenance record not found",
+            requestId: request.id
+          });
     }
   );
 
+  // Resolve maintenance record
   app.post(
     "/v1/maintenance/:maintenanceId/resolve",
     {
       preHandler: authorize("maintenance:write")
     },
     async (request, reply) => {
+
       const { maintenanceId } = parse(
         idParams("maintenanceId"),
         request.params
@@ -1642,439 +1561,52 @@ await app.register(cors, {
         maintenanceId: number;
       };
 
-      const body = parse(
-        z
-          .object({
-            resolvedDate: date.default(
-              () =>
-                new Date()
-                  .toISOString()
-                  .slice(0, 10)
-            )
-          })
-          .strict(),
+      const { resolvedDate } = parse(
+        z.object({
+          resolvedDate: date.default(
+            () => new Date().toISOString().slice(0, 10)
+          )
+        }).strict(),
         request.body ?? {}
       );
 
       const data = await repository.resolveMaintenance(
         request.user.tenantId,
         maintenanceId,
-        body.resolvedDate
+        resolvedDate
       );
 
-      if (!data) {
-        return reply.code(404).send({
-          error: "Maintenance record not found",
-          requestId: request.id
-        });
-      }
-
-      return {
-        data
-      };
+      return data
+        ? { data }
+        : reply.code(404).send({
+            error: "Maintenance record not found",
+            requestId: request.id
+          });
     }
   );
 
-  /**
-   * ============================
-   * MY EQUIPMENT AND REQUESTS
-   * ============================
-   */
+  // ------------------------------------------------
+  // DEVELOPMENT TOKEN
+  // DISABLED IN PRODUCTION
+  // ------------------------------------------------
 
-  const currentUserId = (
-    request: FastifyRequest
-  ) => {
-    const id = Number(request.user.sub);
+  if (process.env.NODE_ENV !== "production") {
 
-    if (!Number.isInteger(id) || id < 1) {
-      throw Object.assign(
-        new Error("Invalid session"),
-        {
-          statusCode: 401
-        }
-      );
-    }
-
-    return id;
-  };
-
-  app.get(
-    "/v1/me/loans",
-    {
-      preHandler: authorize("my-loans:read")
-    },
-    async (request) => {
-      const userId = currentUserId(request);
-
-      const result = await repository.listLoans(
-        request.user.tenantId,
-        {
-          userId,
-          limit: 100
-        }
-      );
-
-      const devices = await Promise.all(
-        result.items.map((loan) =>
-          repository.getDevice(
-            request.user.tenantId,
-            loan.deviceId
-          )
-        )
-      );
-
-      return {
-        data: result.items.map(
-          (loan, index) => ({
-            ...loan,
-            device: devices[index]
-          })
-        )
-      };
-    }
-  );
-
-  app.get(
-    "/v1/me/requests",
-    {
-      preHandler: authorize("my-requests:read")
-    },
-    async (request) => ({
-      data: await listRequests(
-        request.user.tenantId,
-        {
-          userId: currentUserId(request)
-        }
-      )
-    })
-  );
-
-  app.post(
-    "/v1/me/requests",
-    {
-      preHandler: authorize("my-requests:write")
-    },
-    async (request, reply) => {
-      const body = parse(
-        z
-          .object({
-            centerId: positiveId,
-            deviceType,
-            reasonId: positiveId.optional(),
-            reasonText: nonempty(1000)
-          })
-          .strict(),
-        request.body
-      );
-
-      const data = await createRequest(
-        request.user.tenantId,
-        currentUserId(request),
-        body,
-        repository
-      );
-
-      return reply.code(201).send({
-        data
-      });
-    }
-  );
-
-  app.post(
-    "/v1/me/requests/:requestId/cancel",
-    {
-      preHandler: authorize("my-requests:write")
-    },
-    async (request) => {
-      const { requestId } = parse(
-        idParams("requestId"),
-        request.params
-      ) as {
-        requestId: number;
-      };
-
-      const ok = await transitionPending(
-        request.user.tenantId,
-        requestId,
-        "CANCELLED",
-        {
-          ownerId: currentUserId(request)
-        }
-      );
-
-      if (!ok) {
-        throw Object.assign(
-          new Error("Request not found or no longer pending"),
-          {
-            statusCode: 409
-          }
-        );
-      }
-
-      return {
-        data: await getRequest(
-          request.user.tenantId,
-          requestId
-        )
-      };
-    }
-  );
-
-  /**
-   * ============================
-   * EQUIPMENT REQUESTS
-   * ============================
-   */
-
-  app.get(
-    "/v1/requests",
-    {
-      preHandler: authorize("requests:read")
-    },
-    async (request) => {
-      const query = parse(
-        z
-          .object({
-            status: z
-              .enum([
-                "PENDING",
-                "APPROVED",
-                "DENIED",
-                "CANCELLED"
-              ])
-              .optional(),
-            userId: positiveId.optional()
-          })
-          .strict(),
-        request.query
-      );
-
-      return {
-        data: await listRequests(
-          request.user.tenantId,
-          query
-        )
-      };
-    }
-  );
-
-  app.post(
-    "/v1/requests/:requestId/approve",
-    {
-      preHandler: authorize("requests:write")
-    },
-    async (request) => {
-      const tenantId = request.user.tenantId;
-
-      const { requestId } = parse(
-        idParams("requestId"),
-        request.params
-      ) as {
-        requestId: number;
-      };
-
-      const body = parse(
-        z
-          .object({
-            deviceId: positiveId,
-            reasonId: positiveId.optional(),
-            dueDate: dateTime
-          })
-          .strict(),
-        request.body
-      );
-
-      const existing = await getRequest(
-        tenantId,
-        requestId
-      );
-
-      if (!existing) {
-        throw Object.assign(
-          new Error("Request not found"),
-          {
-            statusCode: 404
-          }
-        );
-      }
-
-      const device = await repository.getDevice(
-        tenantId,
-        body.deviceId
-      );
-
-      if (!device) {
-        throw Object.assign(
-          new Error("Device not found"),
-          {
-            statusCode: 404
-          }
-        );
-      }
-
-      if (device.centerId !== existing.centerId) {
-        throw Object.assign(
-          new Error(
-            "Choose available equipment at the requested outreach center"
-          ),
-          {
-            statusCode: 400
-          }
-        );
-      }
-
-      const reasonId =
-        body.reasonId ?? existing.reasonId;
-
-      if (
-        reasonId === null ||
-        reasonId === undefined
-      ) {
-        throw Object.assign(
-          new Error(
-            "Choose a loan reason; the request did not include one"
-          ),
-          {
-            statusCode: 400
-          }
-        );
-      }
-
-      const checkoutDate = new Date().toISOString();
-
-      if (body.dueDate <= checkoutDate) {
-        throw Object.assign(
-          new Error("dueDate must be in the future"),
-          {
-            statusCode: 400
-          }
-        );
-      }
-
-      /**
-       * Claim the request before creating the loan.
-       * This prevents two staff members from fulfilling
-       * the same pending request simultaneously.
-       */
-      const claimed = await transitionPending(
-        tenantId,
-        requestId,
-        "APPROVED"
-      );
-
-      if (!claimed) {
-        throw Object.assign(
-          new Error("Request is no longer pending"),
-          {
-            statusCode: 409
-          }
-        );
-      }
-
-      try {
-        const loan = await repository.createLoan(
-          tenantId,
-          {
-            deviceId: device.deviceId,
-            centerId: device.centerId,
-            reasonId,
-            participantCode: (
-              existing.userEmail ??
-              `user-${existing.userId}`
-            ).slice(0, 50),
-            userId: existing.userId,
-            checkoutDate,
-            dueDate: body.dueDate
-          }
-        );
-
-        return {
-          data: {
-            request: await getRequest(
-              tenantId,
-              requestId
-            ),
-            loan
-          }
-        };
-      } catch (error) {
-        await revertToPending(
-          tenantId,
-          requestId
-        );
-
-        throw error;
-      }
-    }
-  );
-
-  app.post(
-    "/v1/requests/:requestId/deny",
-    {
-      preHandler: authorize("requests:write")
-    },
-    async (request) => {
-      const tenantId = request.user.tenantId;
-
-      const { requestId } = parse(
-        idParams("requestId"),
-        request.params
-      ) as {
-        requestId: number;
-      };
-
-      const ok = await transitionPending(
-        tenantId,
-        requestId,
-        "DENIED"
-      );
-
-      if (!ok) {
-        throw Object.assign(
-          new Error("Request not found or no longer pending"),
-          {
-            statusCode: 409
-          }
-        );
-      }
-
-      return {
-        data: await getRequest(
-          tenantId,
-          requestId
-        )
-      };
-    }
-  );
-
-  /**
-   * ============================
-   * DEVELOPMENT TOKEN
-   * ============================
-   *
-   * This endpoint is only enabled outside production
-   * when ENABLE_DEV_TOKEN=true.
-   */
-  if (
-    process.env.NODE_ENV !== "production" &&
-    process.env.ENABLE_DEV_TOKEN === "true"
-  ) {
     app.post(
       "/v1/dev/token",
       async (request, reply) => {
+
         const body = parse(
-          z
-            .object({
-              tenantId: nonempty(120)
-            })
-            .strict(),
+          z.object({
+            tenantId: nonempty(120)
+          }).strict(),
           request.body
         );
 
         const token = await reply.jwtSign(
           {
             tenantId: body.tenantId,
-            permissions: developmentRoles
+            roles: resourceRoles
           },
           {
             expiresIn: "15m"
@@ -2088,6 +1620,10 @@ await app.register(cors, {
       }
     );
   }
+
+  // ------------------------------------------------
+  // RETURN APPLICATION
+  // ------------------------------------------------
 
   return app;
 }
