@@ -22,6 +22,7 @@ import {
   DEVICE_TYPES,
   LOAN_STATUSES,
   MAINTENANCE_STATUSES,
+  type Account,
   type InventoryRepository
 } from "./types.js";
 
@@ -145,18 +146,6 @@ const adminRoles = [
 const passwordSchema = z.string()
   .min(12, "Password must contain at least 12 characters")
   .max(200);
-
-type Account = {
-  id: number;
-  tenantId: string;
-  name: string;
-  email: string;
-  role: "ADMIN" | "STAFF";
-  status: "Active" | "Inactive";
-  passwordHash: string;
-  passwordSalt: string;
-  lastLogin: string | null;
-};
 
 function hashPassword(
   password: string,
@@ -343,17 +332,11 @@ export async function buildApp(
 
   // ------------------------------------------------
   // USER ACCOUNT STORAGE
-  //
-  // NOTE:
-  // This is temporary in-memory storage.
-  // Accounts are lost when the application restarts.
-  // Replace with persistent database storage before
-  // relying on this system for permanent accounts.
   // ------------------------------------------------
 
-  const accounts = new Map<number, Account>();
-
-  let nextAccountId = 1;
+  // Accounts are stored in the shared
+  // InMemoryInventoryRepository.
+  // No SQL database is used.
 
   // ------------------------------------------------
   // INITIAL ADMINISTRATOR
@@ -373,43 +356,56 @@ export async function buildApp(
       );
     }
 
-    const salt = randomBytes(16).toString("hex");
+    // Prevent duplicate administrator creation
+    // when the repository is reused.
 
-    const admin: Account = {
-      id: nextAccountId++,
-      tenantId,
-      name:
-        process.env.ADMIN_NAME?.trim() ||
-        "System Administrator",
-      email: adminEmail,
-      role: "ADMIN",
-      status: "Active",
-      passwordSalt: salt,
-      passwordHash: hashPassword(
-        adminPassword,
-        salt
-      ),
-      lastLogin: null
-    };
+    const existingAdmin =
+      await repository.findAccountByEmail(
+        tenantId,
+        adminEmail
+      );
 
-    accounts.set(admin.id, admin);
+    if (!existingAdmin) {
+      const salt = randomBytes(16).toString("hex");
+
+      await repository.createAccount(
+        tenantId,
+        {
+          name:
+            process.env.ADMIN_NAME?.trim() ||
+            "System Administrator",
+          email: adminEmail,
+          role: "ADMIN",
+          status: "Active",
+          passwordSalt: salt,
+          passwordHash: hashPassword(
+            adminPassword,
+            salt
+          )
+        }
+      );
+    }
   }
 
   // ------------------------------------------------
   // AUTHENTICATION HOOK
   // ------------------------------------------------
 
-  app.addHook("onRequest", async (request) => {
+   await request.jwtVerify();
 
-    if (
-      !request.url.startsWith("/v1/") ||
-      request.url === "/v1/dev/token" ||
-      request.url === "/v1/auth/login"
-    ) {
-      return;
+    if (request.user.userId !== undefined) {
+      const account = await repository.getAccount(
+        request.user.tenantId,
+        request.user.userId
+      );
+
+      if (!account || account.status !== "Active") {
+        throw Object.assign(
+          new Error("Account is inactive or unavailable"),
+          { statusCode: 401 }
+        );
+      }
     }
-
-    await request.jwtVerify();
   });
 
   // ------------------------------------------------
@@ -440,11 +436,11 @@ export async function buildApp(
         .trim()
         .toLowerCase();
 
-      const account = [...accounts.values()].find(
-        (item) =>
-          item.tenantId === tenantId &&
-          item.email === email
-      );
+      const account =
+        await repository.findAccountByEmail(
+          tenantId,
+          email
+        );
 
       if (
         !account ||
@@ -479,7 +475,21 @@ export async function buildApp(
         });
       }
 
-      account.lastLogin = new Date().toISOString();
+      const updatedAccount =
+        await repository.updateAccount(
+          tenantId,
+          account.id,
+          {
+            lastLogin: new Date().toISOString()
+          }
+        );
+
+      if (!updatedAccount) {
+        return reply.code(401).send({
+          error: "Invalid email or password",
+          requestId: request.id
+        });
+      }
 
       const roles =
         account.role === "ADMIN"
@@ -488,7 +498,7 @@ export async function buildApp(
 
       const token = await reply.jwtSign(
         {
-          tenantId: account.tenantId,
+          tenantId,
           roles,
           userId: account.id,
           role: account.role
@@ -501,15 +511,14 @@ export async function buildApp(
       return {
         token,
         expiresIn: 28800,
-        user: safeAccount(account)
+        user: safeAccount(updatedAccount)
       };
     }
   );
-
-  // ------------------------------------------------
+   // --------------------------------------------------
   // USER MANAGEMENT: LIST USERS
   // ADMIN ONLY
-  // ------------------------------------------------
+  // --------------------------------------------------
 
   app.get(
     "/v1/users",
@@ -518,22 +527,19 @@ export async function buildApp(
     },
     async (request) => {
 
+      const accounts = await repository.listAccounts(
+        request.user.tenantId
+      );
+
       return {
-        data: [...accounts.values()]
-          .filter(
-            (account) =>
-              account.tenantId ===
-              request.user.tenantId
-          )
-          .map(safeAccount)
+        data: accounts.map(safeAccount)
       };
     }
   );
-
-  // ------------------------------------------------
+  // --------------------------------------------------
   // USER MANAGEMENT: CREATE USER
   // ADMIN ONLY
-  // ------------------------------------------------
+  // --------------------------------------------------
 
   app.post(
     "/v1/auth/register",
@@ -560,49 +566,32 @@ export async function buildApp(
         .trim()
         .toLowerCase();
 
-      const exists = [...accounts.values()].some(
-        (account) =>
-          account.tenantId ===
-            request.user.tenantId &&
-          account.email === email
-      );
-
-      if (exists) {
-        return reply.code(409).send({
-          error: "A user with that email already exists",
-          requestId: request.id
-        });
-      }
-
       const salt = randomBytes(16).toString("hex");
 
-      const account: Account = {
-        id: nextAccountId++,
-        tenantId: request.user.tenantId,
-        name: body.name.trim(),
-        email,
-        role: body.role,
-        status: body.status,
-        passwordSalt: salt,
-        passwordHash: hashPassword(
-          body.password,
-          salt
-        ),
-        lastLogin: null
-      };
-
-      accounts.set(account.id, account);
+      const account = await repository.createAccount(
+        request.user.tenantId,
+        {
+          name: body.name.trim(),
+          email,
+          role: body.role,
+          status: body.status,
+          passwordSalt: salt,
+          passwordHash: hashPassword(
+            body.password,
+            salt
+          )
+        }
+      );
 
       return reply.code(201).send({
         data: safeAccount(account)
       });
     }
   );
-
-  // ------------------------------------------------
+   // --------------------------------------------------
   // USER MANAGEMENT: UPDATE USER
   // ADMIN ONLY
-  // ------------------------------------------------
+  // --------------------------------------------------
 
   app.patch(
     "/v1/users/:userId",
@@ -637,18 +626,20 @@ export async function buildApp(
         request.body
       );
 
-      const account = accounts.get(userId);
+      const account = await repository.getAccount(
+        request.user.tenantId,
+        userId
+      );
 
-      if (
-        !account ||
-        account.tenantId !==
-          request.user.tenantId
-      ) {
+      if (!account) {
         return reply.code(404).send({
           error: "User not found",
           requestId: request.id
         });
       }
+
+      // Prevent administrators from removing
+      // their own administrator access.
 
       if (
         request.user.userId === userId &&
@@ -664,14 +655,25 @@ export async function buildApp(
         });
       }
 
-      Object.assign(account, body);
+      const updatedAccount =
+        await repository.updateAccount(
+          request.user.tenantId,
+          userId,
+          body
+        );
+
+      if (!updatedAccount) {
+        return reply.code(404).send({
+          error: "User not found",
+          requestId: request.id
+        });
+      }
 
       return {
-        data: safeAccount(account)
+        data: safeAccount(updatedAccount)
       };
     }
   );
-
   // ------------------------------------------------
   // INVENTORY
   // ------------------------------------------------
