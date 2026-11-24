@@ -1,44 +1,33 @@
 # Community Outreach Technology Loan API
 
-Fastify/TypeScript API for tenant-scoped outreach centers, devices, loans, loan reasons, maintenance, and user authentication. JSON fields use camelCase; a MySQL repository maps them to snake_case columns.
+Fastify/TypeScript API for tenant-scoped outreach centers, devices, loans, loan reasons, and maintenance. JSON fields use camelCase; a MySQL repository maps them to snake_case columns.
 
 ## Run
 
-```bash
+```sh
 npm install
 copy .env.example .env
 npm run dev
 ```
 
-## Environment Configuration
+`npm run dev` and `npm start` both load variables from `.env`.
 
-The backend uses the following environment variables:
+Before starting, replace the `JWT_SECRET` placeholder in `.env` with a random value of **at least 32 characters**. The server refuses to start with `JWT_SECRET must be set to at least 32 characters` otherwise.
 
-| Variable | Description |
-|---|---|
-| `PORT` | API listening port |
-| `HOST` | API host |
-| `JWT_SECRET` | JWT signing secret, minimum 32 characters |
-| `NODE_ENV` | Application environment |
-| `DEMO_TENANT_ID` | Default tenant identifier |
-| `ADMIN_EMAIL` | Initial administrator email |
-| `ADMIN_PASSWORD` | Initial administrator password, minimum 12 characters |
-| `ADMIN_NAME` | Optional administrator display name |
-| `FRONTEND_ORIGIN` | Production frontend origin for CORS |
+Generate a secret with:
 
-Never commit `.env` files, passwords, or production credentials to GitHub.
+```sh
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
 
-## API Authentication
+On Render or another hosting provider, configure `JWT_SECRET` as an environment variable with the same 32-character minimum.
 
-All `/v1` endpoints require authentication except:
+## API conventions
 
-- `POST /v1/auth/login`
-- `POST /v1/dev/token` (development only)
-
-Authenticated requests must include:
+Protected `/v1` endpoints require:
 
 ```http
-Authorization: Bearer YOUR_JWT_TOKEN
+Authorization: Bearer <JWT>
 ```
 
 Successful resource responses use:
@@ -49,7 +38,7 @@ Successful resource responses use:
 }
 ```
 
-Paginated responses also contain:
+Paginated responses also contain pagination metadata:
 
 ```json
 {
@@ -64,235 +53,21 @@ Errors use:
 
 ```json
 {
-  "error": "Error description",
+  "error": "Error message",
   "requestId": "request-id"
 }
 ```
 
-Validation errors include additional details when applicable.
+Validation details may also be included.
 
 Protected endpoints can return:
 
-- `400` for invalid input.
-- `401` for missing or invalid authentication.
-- `403` for insufficient permissions.
-- `404` when a requested resource does not exist.
-- `409` for conflicts.
-- `429` when a rate limit is exceeded.
-- `500` for unexpected server errors.
-
-## Authentication and User Management
-
-The API supports authenticated user accounts with role-based access control (RBAC).
-
-Accounts have one of two roles:
-
-- `ADMIN`
-- `STAFF`
-
-Passwords are hashed on the server using Node.js scrypt with randomly generated salts. Plaintext passwords and password hashes are never returned by the API.
-
-### POST `/v1/auth/login`
-
-- Use case: Authenticate an existing user.
-- Authentication: None.
-- Required role: None.
-- Request body:
-
-```json
-{
-  "email": "admin@example.org",
-  "password": "YourSecurePassword"
-}
-```
-
-- Response: `200` with a JWT and user information.
-
-```json
-{
-  "token": "JWT_TOKEN",
-  "expiresIn": 28800,
-  "user": {
-    "id": 1,
-    "name": "System Administrator",
-    "email": "admin@example.org",
-    "role": "ADMIN",
-    "status": "Active",
-    "lastLogin": "2026-11-23T20:00:00.000Z"
-  }
-}
-```
-
-- Errors:
-  - `400` for invalid request data.
-  - `401` for invalid credentials or inactive accounts.
-  - `429` when the login rate limit is exceeded.
-- Constraints:
-  - Email must be valid.
-  - Password must contain at least one character.
-  - Login requests are limited to 5 per minute.
-  - Successful login tokens expire after 8 hours.
-
-### User Roles and Permissions
-
-#### ADMIN
-
-Administrators receive all existing resource permissions and user-management access:
-
-- `inventory:read`
-- `inventory:write`
-- `loans:read`
-- `loans:write`
-- `centers:read`
-- `centers:write`
-- `maintenance:read`
-- `maintenance:write`
-- `loan-reasons:read`
-- `loan-reasons:write`
-- `users:manage`
-
-#### STAFF
-
-Staff accounts receive the existing resource permissions:
-
-- `inventory:read`
-- `inventory:write`
-- `loans:read`
-- `loans:write`
-- `centers:read`
-- `centers:write`
-- `maintenance:read`
-- `maintenance:write`
-- `loan-reasons:read`
-- `loan-reasons:write`
-
-Staff accounts do not receive `users:manage`.
-
-### GET `/v1/users`
-
-- Use case: Retrieve user accounts belonging to the authenticated tenant.
-- Authentication: JWT required.
-- Required role: `users:manage`.
-- Request: No path parameters, query parameters, or body.
-- Response: `200` with a user array.
-- Errors:
-  - `401` for missing or invalid authentication.
-  - `403` for insufficient permissions.
-
-Example response:
-
-```json
-{
-  "data": [
-    {
-      "id": 1,
-      "name": "System Administrator",
-      "email": "admin@example.org",
-      "role": "ADMIN",
-      "status": "Active",
-      "lastLogin": null
-    }
-  ]
-}
-```
-
-Password hashes and password salts are never included in user responses.
-
-### POST `/v1/auth/register`
-
-- Use case: Create a new user account.
-- Authentication: JWT required.
-- Required role: `users:manage`.
-- Request body:
-
-```json
-{
-  "name": "Staff Member",
-  "email": "staff@example.org",
-  "password": "YourSecurePassword",
-  "role": "STAFF",
-  "status": "Active"
-}
-```
-
-- Response: `201` with the created user.
-- Errors:
-  - `400` for invalid request data.
-  - `401` for missing or invalid authentication.
-  - `403` for insufficient permissions.
-  - `409` when the email address already exists.
-- Constraints:
-  - Name must contain 1–100 characters.
-  - Email must be valid and no longer than 160 characters.
-  - Password must contain at least 12 characters.
-  - Role must be `ADMIN` or `STAFF`.
-  - Status must be `Active` or `Inactive`.
-
-### PATCH `/v1/users/{userId}`
-
-- Use case: Update a user's name, role, or account status.
-- Authentication: JWT required.
-- Required role: `users:manage`.
-- Path parameters: `userId`, a positive integer.
-- Request body: A nonempty subset of `name`, `role`, and `status`.
-
-Example:
-
-```json
-{
-  "role": "STAFF",
-  "status": "Inactive"
-}
-```
-
-- Response: `200` with the updated user.
-- Errors:
-  - `400` for invalid request data or a prohibited self-change.
-  - `401` for missing or invalid authentication.
-  - `403` for insufficient permissions.
-  - `404` when the user does not exist.
-
-An administrator cannot remove their own administrator role or deactivate their own account through this endpoint.
-
-### Initial Administrator Provisioning
-
-The initial administrator is provisioned through environment variables.
-
-Required:
-
-- `ADMIN_EMAIL`
-- `ADMIN_PASSWORD`
-
-Optional:
-
-- `ADMIN_NAME`
-
-The initial administrator receives the `ADMIN` role and `Active` account status.
-
-The initial administrator password must contain at least 12 characters.
-
-Do not hardcode administrator credentials into source code or commit them to GitHub.
-
-### Account Storage
-
-The current proposed prototype implementation uses in-memory account storage.
-
-Accounts created through the API are lost when the application restarts or redeploys.
-
-Persistent database-backed account storage is required before using this implementation for permanent accounts.
-
-### JWT Configuration
-
-- Signing secret: `JWT_SECRET`
-- Minimum secret length: 32 characters.
-- Production login token expiration: 8 hours.
-- Development token expiration: 15 minutes.
-- Token claims include tenant ID, user ID, role, and permissions for authenticated users.
-- Protected endpoints require a valid JWT.
-
-The server validates JWT signatures before allowing access to protected endpoints.
-
----
+- `400` — Invalid input
+- `401` — Missing or invalid authentication
+- `403` — Insufficient permissions
+- `404` — Resource not found
+- `409` — Resource conflict
+- `500` — Unexpected server error
 
 ## Health
 
@@ -567,52 +342,129 @@ The server validates JWT signatures before allowing access to protected endpoint
 - Response: `200` with the `RESOLVED` record; the device becomes `AVAILABLE`.
 - Errors: `404` when the record does not exist; `409` when already resolved or another active maintenance record exists for the device.
 
-## Development Authentication
+## Authentication
 
-### POST `/v1/dev/token`
+**Implementation status:** The existing README documents development-token authentication. The real-user authentication endpoints below describe the planned Admin-managed authentication changes. Do not treat them as available in a deployed API until the backend implementation, tests, and deployment have been completed.
+
+### Existing development authentication
+
+#### POST `/v1/dev/token`
 
 - Use case: Generate a short-lived local-development JWT without supplying role attributes.
 - Authentication: None.
 - Required role: None.
 - Availability: Development only; the route is not registered when `NODE_ENV === "production"`.
-- Request body:
-
-```json
-{
-  "tenantId": "eigen-it"
-}
-```
-
-- Response: `200` with a token and expiration.
-
-```json
-{
-  "token": "JWT_TOKEN",
-  "expiresIn": "15m"
-}
-```
-
-- Notes:
-  - The server assigns all development API resource permissions to the signed token.
-  - This endpoint does not authenticate a real user.
-  - Do not use this endpoint for production authentication.
+- Request body: `tenantId`, a string from 1–120 characters.
+- Response: `200` with `{ "token": string, "expiresIn": "15m" }`.
+- Notes: The server assigns all development API permissions to the signed token.
 
 Example:
 
-```bash
+```sh
 curl -X POST http://127.0.0.1:3020/v1/dev/token \
   -H "content-type: application/json" \
   -d "{\"tenantId\":\"eigen-it\"}"
 ```
 
-## Transaction and Schema TODOs
+### Planned real-user authentication
+
+The intended authentication model replaces the frontend's hardcoded demo accounts and automatic development-token login with accounts authenticated by the backend.
+
+#### POST `/v1/auth/login`
+
+- Use case: Authenticate an existing user.
+- Authentication: None; credentials are supplied in the request.
+- Request body: User email and password.
+- Intended response: A signed JWT and token expiration information.
+- Intended security: Passwords are stored as salted password hashes, not plaintext.
+- Intended protection: Rate limiting on repeated login attempts.
+- Intended token lifetime: 8 hours.
+
+Example request:
+
+```json
+{
+  "email": "admin@orlando.gov",
+  "password": "your-password"
+}
+```
+
+The exact response schema must match the implemented backend before the frontend is integrated.
+
+#### GET `/v1/users`
+
+- Use case: List users for the current tenant.
+- Authentication: JWT required.
+- Required permission: `users:manage`.
+- Intended access: Admin only.
+
+#### POST `/v1/auth/register`
+
+- Use case: Create a user account through an authorized administrator.
+- Authentication: JWT required.
+- Required permission: `users:manage`.
+- Intended access: Admin only.
+- Intended account fields: Name, email, password, and role.
+- Intended roles: `Admin` and `Staff`.
+
+This is not intended to be a public self-registration endpoint.
+
+#### PATCH `/v1/users/{userId}`
+
+- Use case: Update an existing user account.
+- Authentication: JWT required.
+- Required permission: `users:manage`.
+- Intended access: Admin only.
+- Intended updates: Account role and active/inactive status.
+
+### Planned roles and permissions
+
+| Role | Intended access |
+|---|---|
+| Admin | Manage users and access the API functions assigned to the administrative role |
+| Staff | Access operational inventory, centers, loans, loan reasons, and maintenance functions according to the final permission policy |
+
+The exact Staff permission matrix must be reviewed before production. Do not assume that every Staff account should be allowed to create, update, or administer every resource.
+
+### Planned initial administrator configuration
+
+The proposed implementation uses environment variables to provision an initial administrator:
+
+```env
+JWT_SECRET=replace-with-a-random-secret-at-least-32-characters
+ADMIN_EMAIL=admin@orlando.gov
+ADMIN_PASSWORD=replace-with-a-strong-password
+ADMIN_NAME=System Administrator
+DEMO_TENANT_ID=eigen-it
+NODE_ENV=development
+FRONTEND_ORIGIN=http://localhost:3000
+```
+
+Use a unique, strong administrator password. Do not commit real credentials or `.env` files to GitHub.
+
+### Authentication implementation requirements
+
+Before describing real-user authentication as production-ready, the following work must be completed:
+
+1. Implement and test the login endpoint.
+2. Implement Admin-only user listing, creation, and update endpoints.
+3. Replace the frontend's hardcoded demo accounts with backend authentication.
+4. Remove automatic frontend use of `/v1/dev/token` for normal login.
+5. Store account records persistently in the database. An in-memory account map is temporary and loses accounts when the server restarts or redeploys.
+6. Verify password hashing and password comparison.
+7. Verify that inactive users cannot log in.
+8. Verify that Staff cannot access user-management endpoints.
+9. Verify that role changes and account deactivation are handled safely for existing JWT sessions.
+10. Configure production CORS to allow only the intended frontend origin.
+11. Confirm that the development-token endpoint is unavailable in production.
+12. Run the backend tests and a production build before deployment.
+
+## Transaction and schema TODOs
 
 - A production MySQL repository must wrap checkout, return, maintenance opening, and maintenance resolution in transactions.
 - A dedicated device-event table is required to record transfers, manual status changes, and edits independently of loans and maintenance.
 - Consider adding `is_active` to `loan_reasons` if reasons need to be retired without deletion.
 - Add a separate readiness endpoint or check for MySQL connectivity.
-- Replace in-memory account storage with persistent database-backed user accounts before relying on permanent authentication.
-- Add automated tests for successful login, invalid credentials, inactive accounts, role authorization, account creation, and account updates.
-- Review the Staff permission matrix before production deployment.
-- Configure production CORS to allow only the approved frontend origin.
-- Consider account lockout, password reset, and account recovery workflows as additional security requirements.
+- Add persistent user and role storage before using real-user authentication in production.
+- Add automated tests for login, password verification, account status, role-based authorization, and user administration.
+- Review token/session invalidation when an administrator changes a user's role or deactivates an account.
