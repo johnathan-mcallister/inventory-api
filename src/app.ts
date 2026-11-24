@@ -336,7 +336,6 @@ export async function buildApp(
 
   // Accounts are stored in the shared
   // InMemoryInventoryRepository.
-  // No SQL database is used.
 
   // ------------------------------------------------
   // INITIAL ADMINISTRATOR
@@ -390,7 +389,14 @@ export async function buildApp(
   // ------------------------------------------------
   // AUTHENTICATION HOOK
   // ------------------------------------------------
-
+ app.addHook("onRequest", async (request) => {
+    if (
+      !request.url.startsWith("/v1/") ||
+      request.url === "/v1/dev/token" ||
+      request.url === "/v1/auth/login"
+    ) {
+      return;
+    }
    await request.jwtVerify();
 
     if (request.user.userId !== undefined) {
@@ -405,9 +411,15 @@ export async function buildApp(
           { statusCode: 401 }
         );
       }
+
+      // Use current account permissions, not stale JWT roles.
+      request.user.role = account.role;
+      request.user.roles =
+        account.role === "ADMIN"
+          ? adminRoles
+          : resourceRoles;
     }
   });
-
   // ------------------------------------------------
   // LOGIN
   // ------------------------------------------------
