@@ -15,8 +15,8 @@ const SALT_LENGTH = 16;
 const FORMAT = "pbkdf2-sha256";
 
 export async function hashPassword(password: string): Promise<string> {
-  if (password.length < 12 || password.length > 256) {
-    throw new Error("Password must be between 12 and 256 characters");
+  if (password.length < 7 || password.length > 256) {
+    throw new Error("Password must be between 7 and 256 characters");
   }
 
   const salt = randomBytes(SALT_LENGTH);
