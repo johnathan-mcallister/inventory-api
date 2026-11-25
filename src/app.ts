@@ -144,7 +144,7 @@ const adminRoles = [
 // --------------------------------------------------
 
 const passwordSchema = z.string()
-  .min(12, "Password must contain at least 12 characters")
+  .min(7, "Password must contain at least 7 characters")
   .max(200);
 
 function hashPassword(
@@ -338,53 +338,67 @@ export async function buildApp(
   // InMemoryInventoryRepository.
 
   // ------------------------------------------------
-  // INITIAL ADMINISTRATOR
+  // INITIAL DEMO ACCOUNTS
   // ------------------------------------------------
 
-  const adminEmail = process.env.ADMIN_EMAIL
-    ?.trim()
-    .toLowerCase();
+  async function seedDemoAccount(
+    name: string,
+    emailValue: string | undefined,
+    password: string | undefined,
+    role: "ADMIN" | "STAFF"
+  ) {
+    const email = emailValue?.trim().toLowerCase();
 
-  const adminPassword = process.env.ADMIN_PASSWORD;
+    // Skip accounts that are not configured.
+    if (!email || !password) {
+      return;
+    }
 
-  if (adminEmail && adminPassword) {
-
-    if (adminPassword.length < 12) {
+    if (password.length < 7) {
       throw new Error(
-        "ADMIN_PASSWORD must be at least 12 characters"
+        `${role}_PASSWORD must be at least 12 characters`
       );
     }
 
-    // Prevent duplicate administrator creation
-    // when the repository is reused.
-
-    const existingAdmin =
+    // Avoid creating duplicate accounts.
+    const existingAccount =
       await repository.findAccountByEmail(
         tenantId,
-        adminEmail
+        email
       );
 
-    if (!existingAdmin) {
-      const salt = randomBytes(16).toString("hex");
-
-      await repository.createAccount(
-        tenantId,
-        {
-          name:
-            process.env.ADMIN_NAME?.trim() ||
-            "System Administrator",
-          email: adminEmail,
-          role: "ADMIN",
-          status: "Active",
-          passwordSalt: salt,
-          passwordHash: hashPassword(
-            adminPassword,
-            salt
-          )
-        }
-      );
+    if (existingAccount) {
+      return;
     }
+
+    const salt = randomBytes(16).toString("hex");
+
+    await repository.createAccount(
+      tenantId,
+      {
+        name,
+        email,
+        role,
+        status: "Active",
+        passwordSalt: salt,
+        passwordHash: hashPassword(password, salt)
+      }
+    );
   }
+
+  await seedDemoAccount(
+    process.env.ADMIN_NAME?.trim() || "Admin User",
+    process.env.ADMIN_EMAIL,
+    process.env.ADMIN_PASSWORD,
+    "ADMIN"
+  );
+
+  await seedDemoAccount(
+    process.env.STAFF_NAME?.trim() || "Staff User",
+    process.env.STAFF_EMAIL,
+    process.env.STAFF_PASSWORD,
+    "STAFF"
+  );
 
   // ------------------------------------------------
   // AUTHENTICATION HOOK
