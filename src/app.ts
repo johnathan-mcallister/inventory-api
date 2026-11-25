@@ -356,7 +356,7 @@ export async function buildApp(
 
     if (password.length < 7) {
       throw new Error(
-        `${role}_PASSWORD must be at least 12 characters`
+        `${role}_PASSWORD must be at least 7 characters`
       );
     }
 
